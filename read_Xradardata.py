@@ -283,7 +283,9 @@ def MetSTARDataReader(dta_path):
 
 			if elenum != 2 and elenum != 4:
 				if var_type in variable_encode.keys():
-					f[variable_encode[var_type]].loc[int(elenum)][str(int(radcnt))] = (data_raw - offset)/scale
+					# Note !!!
+					# When unsigned int8 meets int32, numpy might give some mis-conversion
+					f[variable_encode[var_type]].loc[int(elenum)][str(int(radcnt))] = (1.0 * data_raw - offset)/scale
 
 		a += 1
 		if state == 6 or state == 4:
@@ -312,9 +314,12 @@ def DROPsNetCDFGen(nc_name, siteinfo, taskinfo, eleinfo, radinfo, radar_data):
 	GatDimId = nc_ds.createDimension("Gate", )
 
 
-
-
-radarDir = "data/Xband"
+radarDir = "rawData/Xband"
 radarDataFile = "BJXSY.20170822.080000.AR2"
 
 site, task, elev, rad, data_pol = MetSTARDataReader(os.path.join(radarDir, radarDataFile))
+
+counter = 1
+for i in data_pol["kdp"].loc[11]["365"]:
+	print(counter, i)
+	counter += 1
