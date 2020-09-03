@@ -294,15 +294,27 @@ def MetSTARDataReader(dta_path):
 
 def DROPsNetCDFGen(nc_name, siteinfo, taskinfo, eleinfo, radinfo, radar_data):
 	nc_ds = nc.Dataset(nc_name, mode="w")
+
 	nc_ds.NetCDFRevision = "lyy_data"
 	nc_ds.GenDate = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 	nc_ds.RadarName = siteinfo['name']
 	nc_ds.Latitude = siteinfo['lat']
 	nc_ds.Longitude = siteinfo['lon']
 	nc_ds.Height = siteinfo['atennaasl']
+	nc_ds.NumGates = 1000
+	nc_ds.ScanId = 3
+	nc_ds.ScanFlag = 1
+	nc_ds.ScanType = taskinfo['scantype']
+	nc_ds.AntennaGain = 44.7
+	nc_ds.AntennaBeamwidth = 0.94
+
+	RadDimId = nc_ds.createDimension("Radial", )
+	GatDimId = nc_ds.createDimension("Gate", )
 
 
-radarDir = "rawData/Xband"
+
+
+radarDir = "data/Xband"
 radarDataFile = "BJXSY.20170822.080000.AR2"
 
 site, task, elev, rad, data_pol = MetSTARDataReader(os.path.join(radarDir, radarDataFile))
