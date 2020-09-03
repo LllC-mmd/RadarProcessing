@@ -96,9 +96,9 @@ def MetSTARDataReader(dta_path):
 		# ------wave form
 		info_dict['waveform'] = np.fromfile(fid, np.int32, 1)[0]
 		# ------pulse repetition frequency 1 (PRF1)
-		info_dict['prf1'] = np.fromfile(fid,np.float32, 1)[0]
+		info_dict['prf1'] = np.fromfile(fid, np.float32, 1)[0]
 		# ------pulse repetition frequency 2 (PRF2)
-		info_dict['prf2'] = np.fromfile(fid, np.int32, 1)[0]
+		info_dict['prf2'] = np.fromfile(fid, np.float32, 1)[0]
 		# ------de-aliasing mode
 		info_dict['unfoldmode'] = np.fromfile(fid, np.int32, 1)[0]
 		# ------azimuth for RHI mode
@@ -106,7 +106,7 @@ def MetSTARDataReader(dta_path):
 		# ------elevation for PPI mode
 		info_dict['ele'] = np.fromfile(fid, np.float32, 1)[0]
 		# ------start angle, i.e., start azimuth for PPI mode or highest elevation for RHI mode
-		info_dict['startangle'] = np.fromfile(fid, np.int32, 1)[0]
+		info_dict['startangle'] = np.fromfile(fid, np.float32, 1)[0]
 		# ------end angle, i.e., end azimuth for PPI mode or lowest elevation for RHI mode
 		info_dict['endangle'] = np.fromfile(fid, np.float32, 1)[0]
 		# ------angular resolution (only for PPI mode)
@@ -114,11 +114,11 @@ def MetSTARDataReader(dta_path):
 		# ------scan speed
 		info_dict['scanspeed'] = np.fromfile(fid, np.float32, 1)[0]
 		# ------log resolution
-		info_dict['logres'] = np.fromfile(fid, np.float32, 1)[0]
+		info_dict['logres'] = np.fromfile(fid, np.int32, 1)[0]
 		# ------Doppler Resolution
-		info_dict['dopres'] = np.fromfile(fid, np.float32, 1)[0]
+		info_dict['dopres'] = np.fromfile(fid, np.int32, 1)[0]
 		# ------Maximum Range corresponding to PRF1
-		info_dict['maxrange1'] = np.fromfile(fid, np.float32, 1)[0]
+		info_dict['maxrange1'] = np.fromfile(fid, np.int32, 1)[0]
 		# ------Maximum Range corresponding to PRF2
 		info_dict['maxrange2'] = np.fromfile(fid, np.int32, 1)[0]
 		# ------start range
@@ -130,9 +130,9 @@ def MetSTARDataReader(dta_path):
 		# ------phase mode
 		info_dict['phasemode'] = np.fromfile(fid, np.int32, 1)[0]
 		# ------atmosphere loss
-		info_dict['atmosloss'] = np.fromfile(fid, np.int32, 1)[0]
+		info_dict['atmosloss'] = np.fromfile(fid, np.float32, 1)[0]
 		# ------Nyquist speed
-		info_dict['vmax'] = np.fromfile(fid, np.int32, 1)[0]
+		info_dict['vmax'] = np.fromfile(fid, np.float32, 1)[0]
 		# ------moments mask
 		info_dict['mask'] = np.fromfile(fid, np.int32, 1)[0]
 		# ------moments size mask
@@ -283,8 +283,7 @@ def MetSTARDataReader(dta_path):
 
 			if elenum != 2 and elenum != 4:
 				if var_type in variable_encode.keys():
-					# Note !!!
-					# When unsigned int8 meets int32, numpy might give some mis-conversion
+					# Note: When operated between unsigned int8 and int32, numpy might give some mis-conversion
 					f[variable_encode[var_type]].loc[int(elenum)][str(int(radcnt))] = (1.0 * data_raw - offset)/scale
 
 		a += 1
@@ -294,8 +293,9 @@ def MetSTARDataReader(dta_path):
 	return siteinfo, taskinfo, eleinfo, radinfo, f
 
 
-def DROPsNetCDFGen(nc_name, siteinfo, taskinfo, eleinfo, radinfo, radar_data):
+def DROPsNetCDFGen(nc_name, siteinfo, taskinfo, eleinfo, radinfo, radar_data, num_gate=1000, elev_id=3):
 	nc_ds = nc.Dataset(nc_name, mode="w")
+	elev_id = str(elev_id)
 
 	nc_ds.NetCDFRevision = "lyy_data"
 	nc_ds.GenDate = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -303,23 +303,61 @@ def DROPsNetCDFGen(nc_name, siteinfo, taskinfo, eleinfo, radinfo, radar_data):
 	nc_ds.Latitude = siteinfo['lat']
 	nc_ds.Longitude = siteinfo['lon']
 	nc_ds.Height = siteinfo['atennaasl']
-	nc_ds.NumGates = 1000
+	nc_ds.NumGates = num_gate
 	nc_ds.ScanId = 3
 	nc_ds.ScanFlag = 1
 	nc_ds.ScanType = taskinfo['scantype']
 	nc_ds.AntennaGain = 44.7
 	nc_ds.AntennaBeamwidth = 0.94
 
-	RadDimId = nc_ds.createDimension("Radial", )
-	GatDimId = nc_ds.createDimension("Gate", )
+	num_rad = len(radinfo[elev_id]['azi'])
+	RadDimId = nc_ds.createDimension("Radial", num_rad)
+	GatDimId = nc_ds.createDimension("Gate", num_gate)
+
+	az_id = nc_ds.createVariable("Azimuth", np.float64, ("Radial", ))
+	az_id.Units = "Degrees"
+	az_id[:] = radinfo[elev_id]['azi']
+	el_id = nc_ds.createVariable("Elevation", np.float64, ("Radial", ))
+	el_id.Units = "Degrees"
+	el_id[:] = radinfo[elev_id]['ele']
+	gw_id = nc_ds.createVariable("GateWidth", np.float64, ("Radial", ))
+	gw_id.Units = "Millimeters"
+	gw_id[:] = np.full(num_rad, eleinfo[elev_id]['logres']*1000)
+	str_id = nc_ds.createVariable("StartRange", np.float64, ("Radial", ))
+	str_id.Units = "Millimeters"
+	str_id[:] = np.full(num_rad, eleinfo[elev_id]['startrange']*1000000)
+	t_id = nc_ds.createVariable("Time", np.int64, ("Radial", ))
+	t_id.Units = "Seconds"
+	t_id[:] = radinfo[elev_id]['sec']
+	tf_id = nc_ds.createVariable("TxFrequency", np.float64, ("Radial", ))
+	tf_id.Units = "Hertz"
+	tf_id[:] = np.full(num_rad, siteinfo['freq']*1000000)
+
+	zh_id = nc_ds.createVariable("Reflectivity", np.float32, ("Radial", "Gate"))
+	zh_id.Units = "dBz"
+	zh_id[:, :] = np.array([v[0:num_gate] for k, v in sorted(radar_data['dbz'].loc[int(elev_id)].items(), key=lambda item: int(item[0]))])
+	zd_id = nc_ds.createVariable("DifferentialReflectivity", np.float32, ("Radial", "Gate"))
+	zd_id.Units = "dB"
+	zd_id[:, :] = np.array([v[0:num_gate] for k, v in sorted(radar_data['zdr'].loc[int(elev_id)].items(), key=lambda item: int(item[0]))])
+	phiDP_id = nc_ds.createVariable("DifferentialPhase", np.float32, ("Radial", "Gate"))
+	phiDP_id.Units = "Degrees"
+	phiDP_id[:, :] = np.array([v[0:num_gate] for k, v in sorted(radar_data['phidp'].loc[int(elev_id)].items(), key=lambda item: int(item[0]))])
+	rhoHV_id = nc_ds.createVariable("CrossPolCorrelation", np.float32, ("Radial", "Gate"))
+	rhoHV_id.Units = "Unitless"
+	rhoHV_id[:, :] = np.array([v[0:num_gate] for k, v in sorted(radar_data['cc'].loc[int(elev_id)].items(), key=lambda item: int(item[0]))])
+	snr_id = nc_ds.createVariable("KDP", np.float32, ("Radial", "Gate"))
+	snr_id.Units = "Unitless"
+	snr_id[:, :] = np.array([v[0:num_gate] for k, v in sorted(radar_data['kdp'].loc[int(elev_id)].items(), key=lambda item: int(item[0]))])
+
+	nc_ds.close()
 
 
 radarDir = "rawData/Xband"
 radarDataFile = "BJXSY.20170822.080000.AR2"
 
-site, task, elev, rad, data_pol = MetSTARDataReader(os.path.join(radarDir, radarDataFile))
+num_gate = 1000
+elev_id = 3
+newNetCDFFile = "_".join(radarDataFile.split(".")[:-1]) + "_" + str(elev_id) + "_" + str(num_gate) + ".nc"
 
-counter = 1
-for i in data_pol["kdp"].loc[11]["365"]:
-	print(counter, i)
-	counter += 1
+site, task, elev, rad, data_pol = MetSTARDataReader(os.path.join(radarDir, radarDataFile))
+DROPsNetCDFGen(newNetCDFFile, site, task, elev, rad, data_pol, num_gate=num_gate, elev_id=elev_id)
