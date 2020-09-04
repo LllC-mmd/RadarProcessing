@@ -7,7 +7,7 @@ import netCDF4 as nc
 import wradlib as wrl
 
 
-def ppi_vis(pol_var, range=None, title=None, colorbar_label=None, cmap=None, norm=None, noData=None):
+def ppi_vis(pol_var, range=None, fig_name=None, title=None, colorbar_label=None, cmap=None, norm=None, noData=None):
     if noData is not None:
         pol_var = np.where(pol_var==noData, np.nan, pol_var)
 
@@ -31,8 +31,8 @@ def ppi_vis(pol_var, range=None, title=None, colorbar_label=None, cmap=None, nor
         cbar.set_label(colorbar_label)
 
     plt.grid(color="grey")
-    # plt.show()
-    plt.savefig("LP_phiDP.png", dpi=400)
+    plt.show()
+    # plt.savefig(fig_name, dpi=400)
 
 
 raw_dir = "Input"
@@ -43,9 +43,6 @@ nc_ds = nc.Dataset(os.path.join(raw_dir, raw_fname), "r")
 GateWidth = np.array(nc_ds.variables["GateWidth"]) / 1000.0 / 1000.0
 zDr = np.array(nc_ds.variables["DifferentialReflectivity"])
 Phi_dp = np.array(nc_ds.variables["DifferentialPhase"])
-rho_hv = np.array(nc_ds.variables["CrossPolCorrelation"])
-KDP = np.array(nc_ds.variables["KDP"])
-reflectivity = np.array(nc_ds.variables["Reflectivity"])
 
 num_radial, num_gate = Phi_dp.shape
 GateWidth_cum = np.full(num_gate, GateWidth[0])
