@@ -62,6 +62,17 @@ def get_LinearCoef(y, x, axis=None):
     return coef
 
 
+def get_invW(dta, axis=None):
+    num_sample = dta.shape[1]
+    num_padding = int((num_sample-1)/2)
+    real_avg = np.mean(np.real(dta), axis=axis)
+    img_avg = np.mean(np.imag(dta), axis=axis)
+    invW = np.sqrt(1.0 - np.sqrt(real_avg**2+img_avg**2))
+    invW = np.concatenate(([invW[0] for i in range(0, num_padding)], invW, [invW[-1] for i in range(0, num_padding)]), axis=0)
+
+    return np.diag(invW)
+
+
 def complex2deg(complex_array):
     deg_array = np.angle(complex_array, deg=True)
     return np.where(deg_array < 0.0, deg_array + 2*180.0, deg_array)
@@ -408,14 +419,13 @@ def PhaseRec_DROPs(Phi_dp_array, GateWidth_array, rho_hv_array, KDP_array, num_g
             b_ini = np.dot(np.dot(b_ini, Q_mat), Phi_dp_i)
             d_ini = Phi_dp_i - 2.0/3.0/val_lambda * np.dot(np.transpose(Q_mat), b_ini)
             b_ini = np.concatenate(([0], b_ini, [0]), axis=0)
-            c_ini = (d_ini[1:] - d_ini[:-1]) / h_vec[:-1] - (b_ini[1:] + 2.0 * b_ini[:-1]) / 3.0 / h_vec[:-1]
+            c_ini = (d_ini[1:] - d_ini[:-1]) / h_vec[:-1] - (b_ini[1:] + 2.0*b_ini[:-1]) * h_vec[:-1] / 3.0
             KDP_ini = 0.5 * np.imag(c_ini / d_ini[:-1])
             KDP_ini = np.concatenate((KDP_ini, [KDP_ini[-1]]), axis=0)
             # ------Then, we do adaptive cubic spline fitting in every rain cell
             val_lambda = 1.1 * w_r
             # ---------calculate the weighting matrix W for the precision of fitting
-            rho_hv_abs = np.abs(rho_hv_array[r, cell_loc])
-            W_inv_mat = np.diag(np.sqrt(1.0 - np.where(rho_hv_abs > 1, 1.0, rho_hv_abs)))
+            W_inv_mat = get_invW(rolling_window(Phi_dp_i, 5), 1)
             # ---------calculate the weighting matrix Mq for the smoothness of fitting
             # ------------replace noData value of KDP observation using 999999.0
             w_q = 1.0 / (2.0 * KDP_ini)
@@ -437,7 +447,7 @@ def PhaseRec_DROPs(Phi_dp_array, GateWidth_array, rho_hv_array, KDP_array, num_g
             # ---------------b1, b_M are set to 0 because of the imposed natural condition
             b_vec = np.concatenate(([0], b_vec, [0]), axis=0)
             # ------------solve a = [a1, a2, ..., a_{M-1}]^T and c = [c1, c2, ..., c_{M-1}]^T
-            c_vec = (d_vec[1:] - d_vec[:-1]) / h_vec[:-1] - (b_vec[1:] + 2.0*b_vec[:-1]) / 3.0 / h_vec[:-1]
+            c_vec = (d_vec[1:] - d_vec[:-1]) / h_vec[:-1] - (b_vec[1:] + 2.0*b_vec[:-1]) * h_vec[:-1] / 3.0
             KDP_array[r, cell_loc[:-1]] = 0.5 * np.imag(c_vec/d_vec[:-1])
 
         if r in record_list:
@@ -461,14 +471,12 @@ reflectivity = np.array(nc_ds.variables["Reflectivity"])
 temperature = np.zeros_like(reflectivity)
 
 # Phi_dp_unfold = PhaseUnfolding(Phi_dp, rho_hv, GateWidth, max_phaseDiff=-180, dphase=360)
-Phi_dp_rec, Kdp_rec = PhaseRec_LP(Phi_dp, KDP, rho_hv, GateWidth)
+# Phi_dp_rec, Kdp_rec = PhaseRec_LP(Phi_dp, KDP, rho_hv, GateWidth)
 # Phi_dp_rec = PhaseRec_GMM(Phi_dp, reflectivity, GateWidth)
 # PhaseRec_fuzzy(reflectivity, zDr, Phi_dp, rho_hv, KDP, temperature, GateWidth)
-# Phi_dp_rec, Kdp_rec = PhaseRec_DROPs(Phi_dp, GateWidth, rho_hv, KDP, d_max=0.95, record_list=[0, 60, 120, 180, 240, 300])
+Phi_dp_rec, Kdp_rec = PhaseRec_DROPs(Phi_dp, GateWidth, rho_hv, KDP, d_max=0.95, record_list=[0, 60, 120, 180, 240, 300])
 
-'''
 num_radial, num_gate = Phi_dp.shape
 GateWidth_cum = np.full(num_gate, GateWidth[0])
 GateWidth_cum = np.cumsum(GateWidth_cum)
-ppi_vis(Phi_dp_rec, "LP_PhiDP.png", range=GateWidth_cum, title="LP-processed $\Phi_{dp}$ at 2019/09/09 18:00:00", colorbar_label="$\Phi_{dp}$ [Degrees$]", noData=-2.0)
-'''
+ppi_vis(Kdp_rec, "DROPs_KDP.png", range=GateWidth_cum, title="DROPs-processed $K_{dp}$ at 2019/09/09 18:00:00", colorbar_label="$K_{dp}$ [Degrees/$\mathrm{km}$]", noData=-5.0)
