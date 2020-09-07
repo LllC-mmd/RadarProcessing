@@ -9,6 +9,8 @@ import os
 import pulp as pl
 from sklearn.mixture import GaussianMixture as GMM
 
+from radarVis import *
+
 
 fuzzy_dict = {"clutter":
                 {"Z": {"m": -99900.0, "a": -99900.0, "b": -99900.0, "w":-99900.0},
@@ -58,6 +60,11 @@ def get_LinearCoef(y, x, axis=None):
     coef = np.mean((y - y_mean)*(x - x_mean), axis=axis) / np.mean((x - x_mean)*(x - x_mean), axis=axis)
 
     return coef
+
+
+def complex2deg(complex_array):
+    deg_array = np.angle(complex_array, deg=True)
+    return np.where(deg_array < 0.0, deg_array + 2*180.0, deg_array)
 
 
 # ************************* Visualization *************************
@@ -170,9 +177,9 @@ def LP_solver(Phi_dp_array):
 
     # ------solve the LP problem
     # ---------use GNU Linear Programming Kit solver
-    lp_prob.solve(pl.GLPK())
+    # lp_prob.solve(pl.GLPK())
     # ---------use default CBC solver
-    # lp_prob.solve()
+    lp_prob.solve()
     # ------check the status of solution
     if lp_prob.status == 1:
         phi_rec = np.array([lp_var[var[i]].varValue for i in range(num_gate, 2*num_gate)])
@@ -187,13 +194,26 @@ def LP_solver(Phi_dp_array):
     return Phi_dp_array
 
 
-def PhaseRec_LP(Phi_dp_array):
+def PhaseRec_LP(Phi_dp_array, KDP_array, rho_hv_array, GateWidth_array, num_good=15, num_bad=10, d_max=0.98, rho_max=0.9, population_min=5):
     num_radial, num_gate = Phi_dp_array.shape
 
     for r in range(0, num_radial):
-        Phi_dp_array[r] = LP_solver(Phi_dp_array[r])
+        # ------rain cell segmentation
+        w_r = GateWidth_array[r]
+        GateWidth_r = np.full(num_gate, w_r)
+        GateWidth_r = np.cumsum(GateWidth_r)
+        labels = dataMasking_DROPs(Phi_dp_array[r], GateWidth_r, rho_hv_array[r], num_good, num_bad, d_max, rho_max, population_min)
+        labels = labels.astype(np.int64)
+        # ------use Linear Programming in every rain cell
+        n_cell = len(np.bincount(labels)) - 1
+        for cid in range(1, n_cell + 1):
+            cell_loc = np.nonzero(labels == cid)[0]
+            Phi_dp_array[r, cell_loc] = LP_solver(Phi_dp_array[r, cell_loc])
+            array_split = rolling_window(Phi_dp_array[r, cell_loc], 5)
+            KDP_array_r = (-0.2*array_split[:, 0] - 0.1*array_split[:, 1] + 0.1*array_split[:, 3] + 0.2*array_split[:, 4]) / w_r
+            KDP_array[r, cell_loc] = np.concatenate(([KDP_array_r[0]], [KDP_array_r[0]], KDP_array_r, [KDP_array_r[-1]], [KDP_array_r[-1]]), axis=0)
 
-    return Phi_dp_array
+    return Phi_dp_array, KDP_array
 
 
 # ---Reconstruct Phi_dp using Fuzzy Logic
@@ -361,8 +381,6 @@ def PhaseRec_DROPs(Phi_dp_array, GateWidth_array, rho_hv_array, KDP_array, num_g
         labels = dataMasking_DROPs(Phi_dp_array[r], GateWidth_r, rho_hv_array[r], num_good, num_bad, d_max, rho_max, population_min)
         labels = labels.astype(np.int64)
 
-        val_lambda = 1.1 * w_r
-
         Kdp_dict = None
         if record_list is not None:
             Kdp_dict = dict.fromkeys(record_list)
@@ -371,48 +389,61 @@ def PhaseRec_DROPs(Phi_dp_array, GateWidth_array, rho_hv_array, KDP_array, num_g
         n_cell = len(np.bincount(labels)) - 1
         for cid in range(1, n_cell+1):
             cell_loc = np.nonzero(labels == cid)[0]
+            h_vec = np.full(cell_loc.shape[0], w_r)  # len(h_vec) = M
             Phi_dp_i = np.cos(Phi_dp_array[r, cell_loc]/180.0*np.pi) + 1.0j * np.sin(Phi_dp_array[r, cell_loc]/180.0*np.pi)
-            # ---------calculate the weighting matrix W for the precision of fitting
-            rho_hv_abs = np.abs(rho_hv_array[r, cell_loc])
-            W_inv_mat = np.diag(np.sqrt(1.0 - np.where(rho_hv_abs > 1, 1.0, rho_hv_abs)))
-            # ---------calculate the weighting matrix Mq for the smoothness of fitting
-            # ------------replace noData value of KDP observation using 999999.0
-            KDP_array_i = np.where(KDP_array[r, cell_loc]==-5.0, 999999.0, KDP_array[r, cell_loc])
-            w_q = 1.0 / (2.0 * KDP_array_i)
-            w_q = np.where(w_q > 5.0, 5.0, w_q)
-            h_vec = np.full(cell_loc.shape[0]-1, w_r)   # len(h_vec) = M-1
-            qh_vec = w_q[:-1] * h_vec
-            p_vec = 2 * (qh_vec[:-1] + qh_vec[1:])
-            Mq_mat = np.diag(p_vec) + np.diag(h_vec[1:-1], k=1) + np.diag(h_vec[1:-1], k=-1)
-            # ---------calculate the solution of cubic spline fitting
-            # ------------prepare coefficient matrix
-            p_vec = np.full(cell_loc.shape[0]-2, 4*w_r)
-            M_mat = np.diag(p_vec) + np.diag(h_vec[1:-1], k=1) + np.diag(h_vec[1:-1], k=-1)
-            l_vec = 3.0 / h_vec
-            u_vec = -l_vec[1:] - l_vec[:-1]
-            Q_mat = np.diag(l_vec[:-1]) + np.diag(u_vec[:-1], k=1) + np.diag(l_vec[1:-2], k=2)
+            # ------First, we need to do non-adaptive fitting to obtain the overall trend of the Kdp proﬁle
+            val_lambda = 0.1 * w_r
+            # ------------prepare coefficient matrix M, Q
+            p_vec = np.full(cell_loc.shape[0] - 2, 4 * w_r)
+            M_mat = np.diag(p_vec) + np.diag(h_vec[1:-2], k=1) + np.diag(h_vec[1:-2], k=-1)
+            l_vec = 3.0 / h_vec[:-1]     # len(l_vec) = M-1
+            u_vec = -l_vec[1:] - l_vec[:-1]    # len(u_vec) = M-2
+            Q_mat = np.diag(l_vec[:-1]) + np.diag(u_vec[:-1], k=1) + np.diag(l_vec[1:-2], k=2)  # size(Q_mat) = (M-2)*M
             Q_last_col = np.zeros((Q_mat.shape[0], 1))
             Q_mat = np.concatenate((Q_mat, Q_last_col, Q_last_col), axis=1)
             Q_mat[-1, -1] = l_vec[-1]
             Q_mat[-2, -2] = l_vec[-2]
             Q_mat[-1, -2] = u_vec[-1]
+            b_ini = np.linalg.inv(M_mat + 2.0/3.0/val_lambda*np.dot(Q_mat, np.transpose(Q_mat)))
+            b_ini = np.dot(np.dot(b_ini, Q_mat), Phi_dp_i)
+            d_ini = Phi_dp_i - 2.0/3.0/val_lambda * np.dot(np.transpose(Q_mat), b_ini)
+            b_ini = np.concatenate(([0], b_ini, [0]), axis=0)
+            c_ini = (d_ini[1:] - d_ini[:-1]) / h_vec[:-1] - (b_ini[1:] + 2.0 * b_ini[:-1]) / 3.0 / h_vec[:-1]
+            KDP_ini = 0.5 * np.imag(c_ini / d_ini[:-1])
+            KDP_ini = np.concatenate((KDP_ini, [KDP_ini[-1]]), axis=0)
+            # ------Then, we do adaptive cubic spline fitting in every rain cell
+            val_lambda = 1.1 * w_r
+            # ---------calculate the weighting matrix W for the precision of fitting
+            rho_hv_abs = np.abs(rho_hv_array[r, cell_loc])
+            W_inv_mat = np.diag(np.sqrt(1.0 - np.where(rho_hv_abs > 1, 1.0, rho_hv_abs)))
+            # ---------calculate the weighting matrix Mq for the smoothness of fitting
+            # ------------replace noData value of KDP observation using 999999.0
+            w_q = 1.0 / (2.0 * KDP_ini)
+            w_q = np.where(w_q > 5.0, 5.0, w_q)
+            qh_vec = w_q[:-1] * h_vec[:-1]
+            p_vec = 2 * (qh_vec[:-1] + qh_vec[1:])
+            Mq_mat = np.diag(p_vec) + np.diag(qh_vec[1:-1], k=1) + np.diag(qh_vec[1:-1], k=-1)
+            # ---------calculate the solution of cubic spline fitting
+            # ------------coefficient matrix remains unchanged
             # ------------solve b = [b2, b3, ..., b_{M-1}]^T and d = [d1, d2, ..., d_M]^T
             cum_mat = np.dot(W_inv_mat, np.transpose(Q_mat))
             cum_mat = np.dot(cum_mat, np.linalg.inv(M_mat))
             cum_mat = np.dot(cum_mat, Mq_mat)
             b_vec = np.linalg.inv(M_mat + 2.0/3.0/val_lambda * np.dot(Q_mat, cum_mat))
-            b_vec = np.dot(np.dot(b_vec, Q_mat), Phi_dp_i)   # len(b_vec) = M-1
+            b_vec = np.dot(np.dot(b_vec, Q_mat), Phi_dp_i)   # len(b_vec) = M-2
+            # ---------------Note that d corresponds to the smoothed angular Phi_dp
             d_vec = Phi_dp_i - 2.0/3.0/val_lambda * np.dot(cum_mat, b_vec)   # len(d_vec) = M
+            Phi_dp_array[r, cell_loc] = complex2deg(d_vec)
             # ---------------b1, b_M are set to 0 because of the imposed natural condition
             b_vec = np.concatenate(([0], b_vec, [0]), axis=0)
             # ------------solve a = [a1, a2, ..., a_{M-1}]^T and c = [c1, c2, ..., c_{M-1}]^T
-            c_vec = (d_vec[1:] - d_vec[:-1]) / h_vec - (b_vec[1:] + 2.0*b_vec[:-1]) / 3.0 / h_vec
+            c_vec = (d_vec[1:] - d_vec[:-1]) / h_vec[:-1] - (b_vec[1:] + 2.0*b_vec[:-1]) / 3.0 / h_vec[:-1]
             KDP_array[r, cell_loc[:-1]] = 0.5 * np.imag(c_vec/d_vec[:-1])
 
         if r in record_list:
             Kdp_dict[r] = KDP_array[r]
 
-    return Phi_dp_array, Kdp_dict
+    return Phi_dp_array, KDP_array
 
 
 raw_dir = "Input"
@@ -429,12 +460,15 @@ reflectivity = np.array(nc_ds.variables["Reflectivity"])
 
 temperature = np.zeros_like(reflectivity)
 
-#np.savetxt("dp_ori.txt", Phi_dp, fmt="%.3f")
-
 # Phi_dp_unfold = PhaseUnfolding(Phi_dp, rho_hv, GateWidth, max_phaseDiff=-180, dphase=360)
-# Phi_dp_rec = PhaseRec_LP(Phi_dp)
+Phi_dp_rec, Kdp_rec = PhaseRec_LP(Phi_dp, KDP, rho_hv, GateWidth)
 # Phi_dp_rec = PhaseRec_GMM(Phi_dp, reflectivity, GateWidth)
 # PhaseRec_fuzzy(reflectivity, zDr, Phi_dp, rho_hv, KDP, temperature, GateWidth)
-Phi_dp_rec = PhaseRec_DROPs(Phi_dp, GateWidth, rho_hv, KDP, d_max=0.95, record_list=[0, 60, 120, 180, 240, 300])
-print(Phi_dp_rec)
-#np.savetxt("dp_rec.txt", Phi_dp_rec, fmt="%.3f")
+# Phi_dp_rec, Kdp_rec = PhaseRec_DROPs(Phi_dp, GateWidth, rho_hv, KDP, d_max=0.95, record_list=[0, 60, 120, 180, 240, 300])
+
+'''
+num_radial, num_gate = Phi_dp.shape
+GateWidth_cum = np.full(num_gate, GateWidth[0])
+GateWidth_cum = np.cumsum(GateWidth_cum)
+ppi_vis(Phi_dp_rec, "LP_PhiDP.png", range=GateWidth_cum, title="LP-processed $\Phi_{dp}$ at 2019/09/09 18:00:00", colorbar_label="$\Phi_{dp}$ [Degrees$]", noData=-2.0)
+'''
