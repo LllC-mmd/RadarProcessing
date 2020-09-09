@@ -1,4 +1,6 @@
 import numpy as np
+import scipy.optimize as opt
+import scipy.integrate as integrate
 import matplotlib.pyplot as plt
 import matplotlib.pylab as plb
 import matplotlib.patches as mpatches
@@ -128,7 +130,8 @@ def plot_label(GateWidth_r, Phi_dp_array, labels):
 
 
 # ************************* Quality Control Algorithms *************************
-# ---Phi_dp unfolding
+# ************* [1] Phase Reconstruction *************
+# ---Phi_dp unfolding (necessary for non-angular method)
 def PhaseUnfolding(Phi_dp_array, rho_hv_array, GateWidth_array, max_phaseDiff=-80, dphase=180):
     std_start = 5.0
     rho_hv_start = 0.9
@@ -164,7 +167,7 @@ def PhaseUnfolding(Phi_dp_array, rho_hv_array, GateWidth_array, max_phaseDiff=-8
     return Phi_dp_array
 
 
-# ---Reconstruct Phi_dp using Linear Programming
+# ---reconstruct Phi_dp using Linear Programming
 def LP_solver(Phi_dp_array):
     num_gate = Phi_dp_array.shape[0]
 
@@ -227,7 +230,7 @@ def PhaseRec_LP(Phi_dp_array, KDP_array, rho_hv_array, GateWidth_array, num_good
     return Phi_dp_array, KDP_array
 
 
-# ---Reconstruct Phi_dp using Fuzzy Logic
+# ---reconstruct Phi_dp using Fuzzy Logic
 def PhaseRec_fuzzy(reflectivity_array, zDr_array, Phi_dp_array, RhoHV_array, KDP_array, T_array, GateWidth_array):
     num_radial, num_gate = Phi_dp_array.shape
     num_sample = 11
@@ -269,7 +272,7 @@ def PhaseRec_fuzzy(reflectivity_array, zDr_array, Phi_dp_array, RhoHV_array, KDP
     plt.savefig("fuzzy_masking.png", dpi=400)
 
 
-# ---Reconstruct Phi_dp using Gaussian Mixture Model
+# ---reconstruct Phi_dp using Gaussian Mixture Model
 def PhaseRec_GMM(Phi_dp_array, reflectivity_array, GateWidth_array):
     num_radial, num_gate = Phi_dp_array.shape
 
@@ -340,7 +343,7 @@ def PhaseRec_GMM(Phi_dp_array, reflectivity_array, GateWidth_array):
     return Phi_dp_array
 
 
-# ---Reconstruct Phi_dp followed the method proposed by DROPs
+# ---reconstruct Phi_dp followed the method proposed by DROPs
 def dataMasking_DROPs(Phi_dp_array, GateWidth_array, rho_hv_array, num_good, num_bad, d_max, rho_max, population_min):
     # ------calculate the dispersion of PhiDP
     d_PhiDP = get_dispersion(rolling_window(Phi_dp_array, num_good), axis=1)
@@ -456,6 +459,47 @@ def PhaseRec_DROPs(Phi_dp_array, GateWidth_array, rho_hv_array, KDP_array, num_g
     return Phi_dp_array, KDP_array
 
 
+# ************* [2] Attenuation Correction *************
+# ---attenuation correction by Z-PHI method
+def get_para_a(reflect_integral, PIA, b=0.78):
+    # ------Ref to
+    # Testud, Jacques, et al. “The Rain Profiling Algorithm Applied to Polarimetric Weather Radar.”
+    # Journal of Atmospheric and Oceanic Technology, vol. 17, no. 3, 2000, pp. 332–356.
+    return 1.0 - np.exp(-0.23*b*PIA) / 0.46 / reflect_integral
+
+
+def phase_loss(c_coef, reflectivity_array, Phi_dp_array, GateWidth_r, r_start, num_gate, b):
+    PIA = c_coef * (Phi_dp_array - Phi_dp_array[r_start])
+    reflect_integral = np.array([integrate.simps(y=np.power(reflectivity_array[r_start:i], b), x=GateWidth_r[r_start:i]) for i in range(r_start, num_gate)])
+    a = get_para_a(reflect_integral, PIA, b=b)
+    attenuation = a * np.power(reflectivity_array, b) / (1.0 - 0.46 * a * b * reflect_integral)
+    Phi_dp_rec = np.array([integrate.simps(y=attenuation[0:i-r_start]/a, x=GateWidth_r[r_start:i]) for i in range(r_start, num_gate)])
+    return np.mean(np.abs(Phi_dp_rec - Phi_dp_array[r_start:]))
+
+
+def correct_ZPHI(reflectivity_array, zDr_array, Phi_dp_array, GateWidth_array, r_start, c_min=0.03, c_max=0.18):
+    num_radial, num_gate = zDr_array.shape
+
+    b_coef = 0.78
+    # c_coef = c_min
+
+    for r in range(0, num_radial):
+        w_r = GateWidth_array[r]
+        GateWidth_r = np.full(num_gate - r_start, w_r)
+        GateWidth_r = np.cumsum(GateWidth_r)
+        # ------find the optimal c by minimizing cost function
+        opt_res = opt.differential_evolution(func=phase_loss, args=(reflectivity_array, Phi_dp_array, GateWidth_r, r_start, num_gate, b_coef),
+                                             tol=1e-4, bounds=(c_min, c_max))
+        c_coef = opt_res["x"]
+        # ------calculate Path-Integrated Attenuation (PIA)
+        PIA = c_coef * (Phi_dp_array - Phi_dp_array[r_start])
+        # ------calculate coefficient a
+        reflect_integral = np.array([integrate.simps(y=np.power(reflectivity_array[r_start:i], b_coef), x=GateWidth_r[r_start:i]) for i in range(r_start, num_gate)])
+        a_coef = get_para_a(reflect_integral, PIA, b=b_coef)
+        reflectivity_array[r_start:] = reflectivity_array[r_start:] / np.power(1.0 - 0.46 * a_coef * b_coef * reflect_integral, 1.0/b_coef)
+
+
+
 raw_dir = "Input"
 raw_fname = "BJXFS_2.5_20190909_180000.netcdf"
 nc_ds = nc.Dataset(os.path.join(raw_dir, raw_fname), "r")
@@ -474,9 +518,11 @@ temperature = np.zeros_like(reflectivity)
 # Phi_dp_rec, Kdp_rec = PhaseRec_LP(Phi_dp, KDP, rho_hv, GateWidth)
 # Phi_dp_rec = PhaseRec_GMM(Phi_dp, reflectivity, GateWidth)
 # PhaseRec_fuzzy(reflectivity, zDr, Phi_dp, rho_hv, KDP, temperature, GateWidth)
-Phi_dp_rec, Kdp_rec = PhaseRec_DROPs(Phi_dp, GateWidth, rho_hv, KDP, d_max=0.95, record_list=[0, 60, 120, 180, 240, 300])
+# Phi_dp_rec, Kdp_rec = PhaseRec_DROPs(Phi_dp, GateWidth, rho_hv, KDP, d_max=0.95, record_list=[0, 60, 120, 180, 240, 300])
 
+'''
 num_radial, num_gate = Phi_dp.shape
 GateWidth_cum = np.full(num_gate, GateWidth[0])
 GateWidth_cum = np.cumsum(GateWidth_cum)
 ppi_vis(Kdp_rec, "DROPs_KDP.png", range=GateWidth_cum, title="DROPs-processed $K_{dp}$ at 2019/09/09 18:00:00", colorbar_label="$K_{dp}$ [Degrees/$\mathrm{km}$]", noData=-5.0)
+'''
