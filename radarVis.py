@@ -7,21 +7,41 @@ import netCDF4 as nc
 import wradlib as wrl
 
 
-def ppi_vis(pol_var, range=None, fig_name=None, title=None, colorbar_label=None, cmap=None, norm=None, noData=None):
+def ppi_vis(pol_var, save_path, var_name, range=None, azimuth=None, title=None, colorbar_label=None, cmap=None, norm=None, noData=None):
     if noData is not None:
         pol_var = np.where(pol_var==noData, np.nan, pol_var)
 
     if cmap is None and norm is None:
-        colors = np.array([[127/255, 127/255, 127/255], [45/255, 255/255, 255/255], [26/255, 155/255, 255/255],
-                            [0/255, 15/255, 150/255], [40/255, 255/255, 47/255], [26/255, 177/255, 30/255],
-                            [15/255, 125/255, 18/255], [250/255, 253/255, 55/255], [255/255, 213/255, 48/255],
-                            [237/255, 143/255, 37/255], [255/255, 12/255, 24/255], [189/255, 7/255, 17/255],
-                            [124/255, 3/255, 8/255], [187/255, 44/255, 232/255], [108/255, 31/255, 120/255]])
-        nvals = np.linspace(0, 180, 16)
+        if var_name == "DifferentialPhase":
+            colors = np.array([[133 / 255, 216 / 255, 253 / 255], [41 / 255, 237 / 255, 238 / 255], [29 / 255, 175 / 255, 243 / 255],
+                               [10 / 255, 35 / 255, 244 / 255], [41 / 255, 253 / 255, 47 / 255], [30 / 255, 199 / 255, 34 / 255],
+                               [19 / 255, 144 / 255, 22 / 255], [254 / 255, 253 / 255, 56 / 255], [230 / 255, 191 / 255, 43 / 255],
+                               [251 / 255, 144 / 255, 37 / 255], [249 / 255, 14 / 255, 28 / 255], [209 / 255, 11 / 255, 21 / 255],
+                               [189 / 255, 8 / 255, 19 / 255], [219 / 255, 102 / 255, 252 / 255], [186 / 255, 36 / 255, 235 / 255],
+                               [92 / 255, 14 / 255, 116 / 255]])
+            nvals = np.linspace(0, 180, 17)
+        elif var_name == "KDP":
+            colors = np.array([[133 / 255, 216 / 255, 253 / 255], [41 / 255, 237 / 255, 238 / 255], [29 / 255, 175 / 255, 243 / 255],
+                               [10/255, 35/255, 244/ 255], [41/255, 253/255, 47/255], [30/ 255, 199/255, 34/255],
+                               [19 / 255, 144 / 255, 22 / 255], [254 / 255, 253 / 255, 56 / 255], [230 / 255, 191 / 255, 43 / 255],
+                               [251 / 255, 144 / 255, 37 / 255], [249 / 255, 14 / 255, 28 / 255], [209 / 255, 11 / 255, 21 / 255],
+                               [189 / 255, 8 / 255, 19 / 255], [219 / 255, 102 / 255, 252 / 255], [186 / 255, 36 / 255, 235 / 255],
+                               [92 / 255, 14 / 255, 116 / 255]])
+            nvals = np.linspace(-1.0, 3.0, 17)
+        elif var_name == "Reflectivity":
+            colors = np.array([[133 / 255, 216 / 255, 253 / 255], [41 / 255, 237 / 255, 238 / 255], [29 / 255, 175 / 255, 243 / 255],
+                               [10 / 255, 35 / 255, 244 / 255], [41 / 255, 253 / 255, 47 / 255], [30 / 255, 199 / 255, 34 / 255],
+                               [19 / 255, 144 / 255, 22 / 255], [254 / 255, 253 / 255, 56 / 255], [230 / 255, 191 / 255, 43 / 255],
+                               [251 / 255, 144 / 255, 37 / 255], [249 / 255, 14 / 255, 28 / 255], [209 / 255, 11 / 255, 21 / 255],
+                               [189 / 255, 8 / 255, 19 / 255], [219 / 255, 102 / 255, 252 / 255], [186 / 255, 36 / 255, 235 / 255]])
+            nvals = np.linspace(0.0, 75.0, 16)
+        else:
+            raise NotImplementedError("Unknown Variable")
+
         cmap, norm = pcolor.from_levels_and_colors(nvals, colors)
 
     fig = plt.figure(figsize=(10, 8))
-    ax, cf = wrl.vis.plot_ppi(data=pol_var, r=range, fig=fig, cmap=cmap, norm=norm)
+    ax, cf = wrl.vis.plot_ppi(data=pol_var, r=range, az=azimuth, fig=fig, cmap=cmap, norm=norm)
 
     if title is not None:
         ax.set_title(title)
@@ -32,20 +52,24 @@ def ppi_vis(pol_var, range=None, fig_name=None, title=None, colorbar_label=None,
 
     plt.grid(color="grey")
     plt.show()
-    # plt.savefig(fig_name, dpi=400)
+    # plt.savefig(save_path, dpi=400)
 
 
-raw_dir = "Input"
-raw_fname = "BJXFS_2.5_20190909_180000.netcdf"
-nc_ds = nc.Dataset(os.path.join(raw_dir, raw_fname), "r")
+def plot_ZH(zH_array, save_path, title=None):
+    colors = np.array([[133/255, 216/255, 253/255], [41/255, 237/255, 238/255], [29/255, 175/255, 243/255],
+                       [10/255, 35/255, 244/255], [41/255, 253/255, 47/255], [30/255, 199/255, 34/255],
+                       [19/255, 144/255, 22/255], [254/255, 253/255, 56/255], [230/255, 191/255, 43/255],
+                       [251/255, 144/255, 37/255], [249/255, 14/255, 28/255], [209/255, 11/255, 21/255],
+                       [189/255, 8/255, 19/255], [219/255, 102/255, 252/255], [186/255, 36/255, 235/255]])
+    nvals = np.linspace(0.0, 45.0, 16)
+    cmap, norm = pcolor.from_levels_and_colors(nvals, colors)
 
-# convert mm to km
-GateWidth = np.array(nc_ds.variables["GateWidth"]) / 1000.0 / 1000.0
-zDr = np.array(nc_ds.variables["DifferentialReflectivity"])
-Phi_dp = np.array(nc_ds.variables["DifferentialPhase"])
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    ax_c = ax.imshow(zH_array, cmap=cmap, norm=norm)
 
-num_radial, num_gate = Phi_dp.shape
-GateWidth_cum = np.full(num_gate, GateWidth[0])
-GateWidth_cum = np.cumsum(GateWidth_cum)
+    if title is not None:
+        ax.set_title(title)
 
-ppi_vis(Phi_dp, range=GateWidth_cum, title="original $\Phi_{dp}$ at 2019/09/09 18:00:00", colorbar_label="$\Phi_{dp}$ [Degrees]", noData=-2.0)
+    cbar = fig.colorbar(ax_c)
+    plt.show()
+    # plt.savefig(save_path, dpi=400)
