@@ -456,20 +456,6 @@ def exportToPNG(nc_dir, export_dir, field="Reflectivity", scale=1.0):
 
 
 if __name__ == "__main__":
-	'''
-	dta_dir = "data/Xband_20170714"
-
-	for f in os.listdir(dta_dir):
-		if f.endswith(".AR2"):
-			num_gate = 1000
-			elev_id = 3
-			newNetCDFFile = "_".join(f.split(".")[:-1]) + "_" + str(elev_id) + "_" + str(num_gate) + ".nc"
-			newNetCDFFile = os.path.join("Temp", newNetCDFFile)
-
-			site, task, elev, rad, data_pol = MetSTARDataReader(os.path.join(dta_dir, f))
-			DROPsNetCDFGen(newNetCDFFile, site, task, elev, rad, data_pol, num_gate=num_gate, elev_id=elev_id)
-	'''
-
 	for f in os.listdir("Temp"):
 		if f.startswith("QC"):
 			station_name = f.split("_")[1]
