@@ -399,15 +399,12 @@ def getRadarDataByExtent(radar_nc_path, save_path, extent):
 	# ---construct an Interpolation Object
 	interp_obj = ipol.Nearest(xy_obs_loc, xy_center_loc)
 
-	# zH_interploate = OrdinaryKriging_obj(reflectivity.flatten()[sample_loc])
 	zH_interploate = interp_obj(reflectivity.flatten())
 	zH_interploate = np.reshape(zH_interploate, (num_row, num_col))
 
-	# zDr_interploate = OrdinaryKriging_obj(zDr.flatten()[sample_loc])
 	zDr_interploate = interp_obj(zDr.flatten())
 	zDr_interploate = np.reshape(zDr_interploate, (num_row, num_col))
 
-	# Kdp_interploate = OrdinaryKriging_obj(KDP.flatten()[sample_loc])
 	Kdp_interploate = interp_obj(KDP.flatten())
 	Kdp_interploate = np.reshape(Kdp_interploate, (num_row, num_col))
 
