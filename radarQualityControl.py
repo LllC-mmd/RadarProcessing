@@ -45,10 +45,24 @@ def memFunc(x, m, al, bl, ar=None, br=None):
     return mf
 
 
-def get_dispersion(dta, axis=None):
+def get_dispersion(dta, axis=None, deg=True):
+    # ------If Phi_dp is represented in Degrees, convert it into Radian representation first
+    if deg:
+        dta = dta * np.pi / 180.0
     dta_c = np.cos(dta)
     dta_s = np.sin(dta)
-    return np.var(dta_c, axis=axis) + np.var(dta_s, axis=axis)
+    # return np.var(dta_c, axis=axis) + np.var(dta_s, axis=axis)
+    return np.sqrt(np.mean(dta_c, axis=axis)**2 + np.mean(dta_s, axis=axis)**2)
+
+
+def get_good_point(dispersion, d_max, axis):
+    test_sample = np.all(dispersion > d_max, axis=axis)
+    return np.where(test_sample)[0]
+
+
+def get_bad_point(dispersion, Rho_HV, d_max, rho_max, axis):
+    test_sample = np.logical_and(np.all(dispersion < d_max, axis=axis), Rho_HV < rho_max)
+    return np.where(test_sample)[0]
 
 
 def get_LinearCoef(y, x, axis=None):
@@ -65,8 +79,8 @@ def get_LinearCoef(y, x, axis=None):
 
 
 def get_invW(dta, axis=None):
-    #real_avg = np.mean(np.cos(dta/180.0*np.pi), axis=axis)
-    #img_avg = np.mean(np.sin(dta/180.0*np.pi), axis=axis)
+    # real_avg = np.mean(np.cos(dta/180.0*np.pi), axis=axis)
+    # img_avg = np.mean(np.sin(dta/180.0*np.pi), axis=axis)
     invW = np.sqrt(np.var(dta/180.0*np.pi, axis=axis))
 
     return np.diag(invW)
@@ -195,8 +209,7 @@ def LP_solver(Phi_dp_array):
     if lp_prob.status == 1:
         phi_rec = np.array([lp_var[var[i]].varValue for i in range(num_gate, 2*num_gate)])
         # ------smoothing filter to prevent subﬁlter-length oscillations
-        Phi_dp_array[2:num_gate-2] = 0.1 * phi_rec[0:num_gate-4] + 0.25 * phi_rec[1:num_gate-3] \
-                                     + 0.3 * phi_rec[2:num_gate-2] + 0.25 * phi_rec[3:num_gate-1] + 0.1 * phi_rec[4:num_gate]
+        Phi_dp_array[2:num_gate-2] = 0.1 * phi_rec[0:num_gate-4] + 0.25 * phi_rec[1:num_gate-3] + 0.3 * phi_rec[2:num_gate-2] + 0.25 * phi_rec[3:num_gate-1] + 0.1 * phi_rec[4:num_gate]
         Phi_dp_array[num_gate-2] = Phi_dp_array[num_gate-3]
         Phi_dp_array[num_gate-1] = Phi_dp_array[num_gate-3]
     else:
@@ -235,7 +248,7 @@ def PhaseRec_LP(Phi_dp_array, KDP_array, rho_hv_array, GateWidth_array, num_good
 
 
 # ---reconstruct Phi_dp using Fuzzy Logic
-def PhaseRec_fuzzy(reflectivity_array, zDr_array, Phi_dp_array, RhoHV_array, KDP_array, T_array, GateWidth_array):
+def PhaseRec_fuzzy(reflectivity_array, zDr_array, Phi_dp_array, RhoHV_array, KDP_array, T_array):
     num_radial, num_gate = Phi_dp_array.shape
     num_sample = 11
     num_padding = int((num_sample-1)/2)
@@ -257,23 +270,11 @@ def PhaseRec_fuzzy(reflectivity_array, zDr_array, Phi_dp_array, RhoHV_array, KDP
         s = (fuzzy_dict["clutter"]["zDr_std"]["w"] * mf_zDr + fuzzy_dict["clutter"]["PhiDP_std"]["w"] * mf_phi_dp
              + fuzzy_dict["clutter"]["RhoHV"]["w"] * mf_RhoHV) / (fuzzy_dict["clutter"]["zDr_std"]["w"] + fuzzy_dict["clutter"]["PhiDP_std"]["w"] + fuzzy_dict["clutter"]["RhoHV"]["w"])
 
-        if r in loc_dic.keys():
-            ir, jr = loc_dic[r]
-            clutter_loc = np.nonzero(s >= 0.5)
-            weather_loc = np.nonzero(s < 0.5)
+        clutter_loc = np.nonzero(s >= 0.5)
+        Phi_dp_array[r, clutter_loc] = -2.0
+        KDP_array[r, clutter_loc] = -5.0
 
-            w_r = GateWidth_array[r]
-            GateWidth_r = np.full(num_gate, w_r)
-            GateWidth_r = np.cumsum(GateWidth_r)
-
-            ax[ir, jr].scatter(GateWidth_r[clutter_loc], Phi_dp_array[r, clutter_loc], c="darkgrey", label="clutter", s=5)
-            ax[ir, jr].scatter(GateWidth_r[weather_loc], Phi_dp_array[r, weather_loc], c="royalblue", label="weather", s=5)
-
-            ax[ir, jr].set_title("No. Radial = %d" % r)
-            ax[ir, jr].legend(fontsize="small", ncol=4)
-
-    # plt.show()
-    plt.savefig("fuzzy_masking.png", dpi=400)
+    return Phi_dp_array, KDP_array
 
 
 # ---reconstruct Phi_dp using Gaussian Mixture Model
@@ -351,18 +352,17 @@ def PhaseRec_GMM(Phi_dp_array, reflectivity_array, GateWidth_array):
 def dataMasking_DROPs(Phi_dp_array, GateWidth_array, rho_hv_array, num_good, num_bad, d_max, rho_max, population_min):
     # ------calculate the dispersion of PhiDP
     d_PhiDP_good = get_dispersion(rolling_window(Phi_dp_array, num_good), axis=1)
-    num_pad_s = int((num_good-1)/2)
+    num_pad_s = int((num_good - 1) / 2)
     num_pad_e = Phi_dp_array.shape[0] - num_pad_s - d_PhiDP_good.shape[0]
     d_PhiDP_good = np.concatenate(([d_PhiDP_good[0] for i in range(0, num_pad_s)], d_PhiDP_good, [d_PhiDP_good[-1] for i in range(0, num_pad_e)]), axis=0)
-    # d_PhiDP = np.concatenate((d_PhiDP_good, [d_PhiDP_good[-1] for i in range(0, num_good - 1)]), axis=0)
 
     d_PhiDP_bad = get_dispersion(rolling_window(Phi_dp_array, num_bad), axis=1)
     num_pad_s = int((num_bad - 1) / 2)
     num_pad_e = Phi_dp_array.shape[0] - num_pad_s - d_PhiDP_bad.shape[0]
     d_PhiDP_bad = np.concatenate(([d_PhiDP_bad[0] for i in range(0, num_pad_s)], d_PhiDP_bad, [d_PhiDP_bad[-1] for i in range(0, num_pad_e)]), axis=0)
 
-    id_start = np.where(d_PhiDP_good >= d_max)[0]
-    id_end = np.where((d_PhiDP_bad < d_max) & (rho_hv_array < rho_max))[0]
+    id_start = get_good_point(rolling_window(d_PhiDP_good, num_good), d_max, axis=1)
+    id_end = get_bad_point(rolling_window(d_PhiDP_bad, num_bad), rho_hv_array[:-num_bad+1], d_max, rho_max, axis=1)
 
     # ------rain cell segmentation
     counter = 0
@@ -482,12 +482,15 @@ def get_KDP_lower(KDP_DROPs, KDP_lower_est):
     return KDP_lower
 
 
-def get_KDP_higher(KDP_DROPs):
-    KDP_higher = np.full_like(KDP_DROPs, 10.0)
+def get_KDP_higher(KDP_higher_est, ZH_array):
+    KDP_higher = np.copy(KDP_higher_est)
+    KDP_higher[np.logical_and(KDP_higher_est > 8.0, ZH_array < 35.0)] = 8.0
+    KDP_higher[np.logical_and(KDP_higher_est > 10.0, ZH_array < 45.0)] = 10.0
+
     return KDP_higher
 
 
-def PhaseRec_hybrid(Phi_dp_array, GateWidth_array, reflectivity_array, zDr_array, rho_hv_array, KDP_array, kdp_zh_zdr_para, num_good=15, num_bad=10, d_max=0.98, rho_max=0.9, population_min=5, masked=True):
+def PhaseRec_hybrid(Phi_dp_array, GateWidth_array, reflectivity_array, zDr_array, rho_hv_array, KDP_array, kdp_zh_zdr_para, num_good=10, num_bad=5, d_max=0.98, rho_max=0.9, population_min=5, masked=True):
     num_radial, num_gate = Phi_dp_array.shape
     # ------KDP = c * Zh^alpha * Zdr^beta
     c, alpha, beta = kdp_zh_zdr_para
@@ -538,7 +541,7 @@ def PhaseRec_hybrid(Phi_dp_array, GateWidth_array, reflectivity_array, zDr_array
             KDP_lower_est = (1 - 0.25) * KDP_est
             KDP_higher_est = (1 + 0.25) * KDP_est
             KDP_lower = get_KDP_lower(KDP_ini, KDP_lower_est)
-            KDP_higher = get_KDP_higher(KDP_ini)
+            KDP_higher = get_KDP_higher(KDP_higher_est, reflectivity_array[r, cell_loc])
             Phi_dp_array[r, cell_loc] = LP_solver_constraints(Phi_dp_array[r, cell_loc], w_r, KDP_lower, KDP_higher)
             array_split = rolling_window(Phi_dp_array[r, cell_loc], 5)
             KDP_array_r = (-0.2 * array_split[:, 0] - 0.1 * array_split[:, 1] + 0.1 * array_split[:, 3] + 0.2 * array_split[:, 4]) / w_r
@@ -591,44 +594,52 @@ def LP_solver_constraints(Phi_dp_array, width, KDP_lower_bound, KDP_higher_bound
 
 # ************* [2] Attenuation correction *************
 # ---attenuation correction by Z-PHI method
-def get_para_a(reflect_integral, PIA, b=0.78):
+def get_para_a(ZH_integral, PIA_start, PIA_end, b=0.7339):
     # ------Ref to
     # Testud, Jacques, et al. “The Rain Profiling Algorithm Applied to Polarimetric Weather Radar.”
     # Journal of Atmospheric and Oceanic Technology, vol. 17, no. 3, 2000, pp. 332–356.
-    return (1.0 - np.exp(-0.23*b*PIA)) / 0.46 / reflect_integral
+    return (np.exp(-0.23*b*PIA_start) - np.exp(-0.23*b*PIA_end)) / 0.46 / b / ZH_integral
 
 
-def phase_loss(c_coef, reflectivity_array, Phi_dp_array, GateWidth_r, r_start, num_gate, b):
-    PIA = c_coef * (Phi_dp_array - Phi_dp_array[r_start])
-    reflect_integral = np.array([integrate.simps(y=np.power(reflectivity_array[r_start:i], b), x=GateWidth_r[r_start:i]) for i in range(r_start, num_gate)])
-    a = get_para_a(reflect_integral, PIA, b=b)
-    attenuation = a * np.power(reflectivity_array, b) / (1.0 - 0.46 * a * b * reflect_integral)
-    Phi_dp_rec = np.array([integrate.simps(y=attenuation[0:i-r_start]/a, x=GateWidth_r[r_start:i]) for i in range(r_start, num_gate)])
-    return np.mean(np.abs(Phi_dp_rec - Phi_dp_array[r_start:]))
+def phase_loss(c_coef, Zh, Phi_dp, GateWidth, num_sample, b=0.7339):
+    PIA = c_coef * (Phi_dp - Phi_dp[0])
+    ZH_integral = np.array([integrate.simps(y=np.power(Zh[0:i+1], b), x=GateWidth[0:i+1]) for i in range(0, num_sample)])
+    a = get_para_a(ZH_integral, 0.0, PIA, b=b)
+    attenuation = a * np.power(Zh, b) / (1.0 - 0.46 * a * b * ZH_integral)
+    attenuation_int = attenuation / c_coef
+    Phi_dp_rec = np.array([integrate.simps(y=attenuation_int[0:i+1], x=GateWidth[0:i+1]) for i in range(0, num_sample)])
+    return np.mean(np.abs(Phi_dp[0] + Phi_dp_rec - Phi_dp))
 
 
-def correct_ZPHI(reflectivity_array, zDr_array, Phi_dp_array, GateWidth_array, r_start, c_min=0.03, c_max=0.18):
+def correct_ZPHI(ZH_array, zDr_array, Phi_dp_array, GateWidth_array, r_start, c_min=0.01, c_max=0.25, b_coef=0.7339):
     num_radial, num_gate = zDr_array.shape
+    num_correct = num_gate - r_start
 
-    b_coef = 0.78
-    # c_coef = c_min
+    # ------set the value of ZH in the noData region to 0 for further integral computation
+    Phi_dp_noData = -2.0
+    ZH_array = np.where(Phi_dp_array == Phi_dp_noData, 0.0, ZH_array)
 
     for r in range(0, num_radial):
+        Zh_i = np.power(10.0, ZH_array[r, r_start:]/10.0)
+        Phi_dp_i = Phi_dp_array[r, r_start:]
+
         w_r = GateWidth_array[r]
-        GateWidth_r = np.full(num_gate - r_start, w_r)
+        GateWidth_r = np.full(num_correct, w_r)
         GateWidth_r = np.cumsum(GateWidth_r)
         # ------find the optimal c by minimizing cost function
-        opt_res = opt.differential_evolution(func=phase_loss, args=(reflectivity_array, Phi_dp_array, GateWidth_r, r_start, num_gate, b_coef),
-                                             tol=1e-4, bounds=(c_min, c_max))
+        opt_res = opt.differential_evolution(func=phase_loss, args=(Zh_i, Phi_dp_i, GateWidth_r, num_correct, b_coef),
+                                             tol=1e-2, bounds=[(c_min, c_max)])
         c_coef = opt_res["x"]
         # ------calculate Path-Integrated Attenuation (PIA)
-        PIA = c_coef * (Phi_dp_array - Phi_dp_array[r_start])
+        PIA = c_coef * (Phi_dp_i - Phi_dp_i[0])
         # ------calculate coefficient a
-        reflect_integral = np.array([integrate.simps(y=np.power(reflectivity_array[r_start:i], b_coef), x=GateWidth_r[r_start:i]) for i in range(r_start, num_gate)])
-        a_coef = get_para_a(reflect_integral, PIA, b=b_coef)
-        reflectivity_array[r_start:] = reflectivity_array[r_start:] / np.power(1.0 - 0.46 * a_coef * b_coef * reflect_integral, 1.0/b_coef)
+        ZH_integral = np.array([integrate.simps(y=np.power(Zh_i[0:i+1]/10.0, b_coef), x=GateWidth_r[0:i+1]) for i in range(0, num_correct)])
+        a_coef = get_para_a(ZH_integral, 0.0, PIA, b=b_coef)
 
+        Zh_i_corrected = Zh_i / np.power(1.0 - 0.46 * a_coef * b_coef * ZH_integral, 1.0/b_coef)
+        ZH_array[r, r_start:] = 10.0 * np.log10(Zh_i_corrected)
 
+        
 if __name__ == "__main__":
     raw_dir = "Input"
     raw_fname = "BJXFS_2.5_20190909_180000.netcdf"
