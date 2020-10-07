@@ -604,7 +604,7 @@ def get_para_a(ZH_integral, PIA_start, PIA_end, b=0.7339):
 def phase_loss(c_coef, Zh, Phi_dp, GateWidth, num_sample, b=0.7339):
     PIA = c_coef * (Phi_dp - Phi_dp[0])
     ZH_integral = np.array([integrate.simps(y=np.power(Zh[0:i+1], b), x=GateWidth[0:i+1]) for i in range(0, num_sample)])
-    a = get_para_a(ZH_integral, 0.0, PIA, b=b)
+    a = get_para_a(ZH_integral[-1], 0.0, PIA[-1], b=b)
     attenuation = a * np.power(Zh, b) / (1.0 - 0.46 * a * b * ZH_integral)
     attenuation_int = attenuation / c_coef
     Phi_dp_rec = np.array([integrate.simps(y=attenuation_int[0:i+1], x=GateWidth[0:i+1]) for i in range(0, num_sample)])
@@ -613,31 +613,52 @@ def phase_loss(c_coef, Zh, Phi_dp, GateWidth, num_sample, b=0.7339):
 
 def correct_ZPHI(ZH_array, zDr_array, Phi_dp_array, GateWidth_array, r_start, c_min=0.01, c_max=0.25, b_coef=0.7339):
     num_radial, num_gate = zDr_array.shape
-    num_correct = num_gate - r_start
+
+    step = 0.01
+    c_search = np.linspace(c_min, c_max, int((c_max - c_min) / step)+1)
 
     # ------set the value of ZH in the noData region to 0 for further integral computation
     Phi_dp_noData = -2.0
     ZH_array = np.where(Phi_dp_array == Phi_dp_noData, 0.0, ZH_array)
 
     for r in range(0, num_radial):
-        Zh_i = np.power(10.0, ZH_array[r, r_start:]/10.0)
-        Phi_dp_i = Phi_dp_array[r, r_start:]
-
+        # ------determine the end point of attenuation correction
+        # ---------which is the end point of the last rain cell
+        noData_loc = np.where(Phi_dp_array[r] < 0.0)[0]
+        check = noData_loc[1:] - noData_loc[:-1]
+        discontinuity_set = np.where(check > 1)[0]
+        if len(discontinuity_set) == 0:
+            if len(check) == num_gate - 1:
+                continue
+            else:
+                id_end = noData_loc[len(check)]
+        else:
+            id_end = noData_loc[discontinuity_set[-1]+1]
+        Zh_i = np.power(10.0, ZH_array[r, r_start:id_end]/10.0)
+        Phi_dp_i = Phi_dp_array[r, r_start:id_end]
+        num_correct = len(Zh_i)
         w_r = GateWidth_array[r]
         GateWidth_r = np.full(num_correct, w_r)
         GateWidth_r = np.cumsum(GateWidth_r)
         # ------find the optimal c by minimizing cost function
-        opt_res = opt.differential_evolution(func=phase_loss, args=(Zh_i, Phi_dp_i, GateWidth_r, num_correct, b_coef),
-                                             tol=1e-2, bounds=[(c_min, c_max)])
+        phase_loss_list = [phase_loss(c_i, Zh_i, Phi_dp_i, GateWidth_r, num_correct, b_coef) for c_i in c_search]
+        c_coef = c_search[np.argmin(phase_loss_list)]
+        '''
+        # ------ use some optimization algorithms from SciPy (not recommended)
+        opt_res = opt.minimize(fun=phase_loss, x0=c_max, args=(Zh_i, Phi_dp_i, GateWidth_r, num_correct, b_coef),
+                               method="SLSQP", tol=1e-4, bounds=[(c_min, c_max)])
         c_coef = opt_res["x"]
+        '''
         # ------calculate Path-Integrated Attenuation (PIA)
         PIA = c_coef * (Phi_dp_i - Phi_dp_i[0])
         # ------calculate coefficient a
         ZH_integral = np.array([integrate.simps(y=np.power(Zh_i[0:i+1]/10.0, b_coef), x=GateWidth_r[0:i+1]) for i in range(0, num_correct)])
-        a_coef = get_para_a(ZH_integral, 0.0, PIA, b=b_coef)
-
+        a_coef = get_para_a(ZH_integral[-1], 0.0, PIA[-1], b=b_coef)
         Zh_i_corrected = Zh_i / np.power(1.0 - 0.46 * a_coef * b_coef * ZH_integral, 1.0/b_coef)
-        ZH_array[r, r_start:] = 10.0 * np.log10(Zh_i_corrected)
+        ZH_array[r, r_start:id_end] = 10.0 * np.log10(Zh_i_corrected)
+        print(r, c_coef)
+
+    return ZH_array
 
         
 if __name__ == "__main__":
