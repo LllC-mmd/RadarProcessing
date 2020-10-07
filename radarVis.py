@@ -8,8 +8,17 @@ import wradlib as wrl
 
 
 def ppi_vis(pol_var, save_path, var_name, range=None, azimuth=None, title=None, colorbar_label=None, cmap=None, norm=None, noData=None):
-    if noData is not None:
-        pol_var = np.where(pol_var==noData, np.nan, pol_var)
+    if noData is None:
+        if var_name == "DifferentialPhase":
+            noData = -2.0
+        elif var_name == "KDP":
+            noData = -5.0
+        elif var_name == "Reflectivity":
+            noData = -33.0
+        else:
+            raise NotImplementedError("Unknown Variable")
+
+    pol_var = np.where(pol_var == noData, np.nan, pol_var)
 
     if cmap is None and norm is None:
         if var_name == "DifferentialPhase":
@@ -51,8 +60,8 @@ def ppi_vis(pol_var, save_path, var_name, range=None, azimuth=None, title=None, 
         cbar.set_label(colorbar_label)
 
     plt.grid(color="grey")
-    plt.show()
-    # plt.savefig(save_path, dpi=400)
+    # plt.show()
+    plt.savefig(save_path, dpi=400)
 
 
 def plot_ZH(zH_array, save_path, title=None):
