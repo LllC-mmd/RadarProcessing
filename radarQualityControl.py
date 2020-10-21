@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.optimize as opt
 import scipy.integrate as integrate
+import cv2
 import matplotlib.pyplot as plt
 import matplotlib.pylab as plb
 import matplotlib.patches as mpatches
@@ -28,9 +29,16 @@ fuzzy_dict = {"clutter":
 
 
 # ************************* General Math functions *************************
-def rolling_window(dta, window_length):
+def rolling_window_1D(dta, window_length):
     shape = dta.shape[:-1] + (dta.shape[-1] - window_length + 1, window_length)
     strides = dta.strides + (dta.strides[-1], )
+    dta_window = np.lib.stride_tricks.as_strided(dta, shape=shape, strides=strides)
+    return dta_window
+
+
+def rolling_window_2D(dta, kernel_size):
+    shape = dta.shape[:-2] + (dta.shape[-2] - kernel_size[-2] + 1, dta.shape[-1] - kernel_size[-1] + 1, kernel_size[-2], kernel_size[-1])
+    strides = dta.strides + (dta.strides[-2], dta.strides[-1], )
     dta_window = np.lib.stride_tricks.as_strided(dta, shape=shape, strides=strides)
     return dta_window
 
@@ -51,17 +59,18 @@ def get_dispersion(dta, axis=None, deg=True):
         dta = dta * np.pi / 180.0
     dta_c = np.cos(dta)
     dta_s = np.sin(dta)
-    # return np.var(dta_c, axis=axis) + np.var(dta_s, axis=axis)
-    return np.sqrt(np.mean(dta_c, axis=axis)**2 + np.mean(dta_s, axis=axis)**2)
+    return np.sqrt(np.nanmean(dta_c, axis=axis)**2 + np.nanmean(dta_s, axis=axis)**2)
 
 
-def get_good_point(dispersion, d_max, axis):
-    test_sample = np.all(dispersion > d_max, axis=axis)
+def get_good_point(dispersion, d_max, axis=None):
+    test_sample = (dispersion > d_max)
+    # test_sample = np.all(dispersion > d_max, axis=axis)
     return np.where(test_sample)[0]
 
 
-def get_bad_point(dispersion, Rho_HV, d_max, rho_max, axis):
-    test_sample = np.logical_and(np.all(dispersion < d_max, axis=axis), Rho_HV < rho_max)
+def get_bad_point(dispersion, Rho_HV, d_max, rho_max, axis=None):
+    test_sample = np.logical_and(np.logical_or(dispersion < d_max, np.isnan(dispersion)), Rho_HV < rho_max)
+    # test_sample = np.logical_and(np.all(dispersion < d_max, axis=axis), Rho_HV < rho_max)
     return np.where(test_sample)[0]
 
 
@@ -79,8 +88,6 @@ def get_LinearCoef(y, x, axis=None):
 
 
 def get_invW(dta, axis=None):
-    # real_avg = np.mean(np.cos(dta/180.0*np.pi), axis=axis)
-    # img_avg = np.mean(np.sin(dta/180.0*np.pi), axis=axis)
     invW = np.sqrt(np.var(dta/180.0*np.pi, axis=axis))
 
     return np.diag(invW)
@@ -89,6 +96,52 @@ def get_invW(dta, axis=None):
 def complex2deg(complex_array):
     deg_array = np.angle(complex_array, deg=True)
     return np.where(deg_array < 0.0, deg_array + 2*180.0, deg_array)
+
+
+def ConnectedComponent_masking(dta, noData, population_min=30):
+    img_gray = np.full_like(dta, 255)
+    img_gray[dta==noData] = 0
+    num_labels, labels, stats, centers = cv2.connectedComponentsWithStats(img_gray.astype('uint8'), connectivity=8, ltype=cv2.CV_32S)
+
+    cid_minority = np.where(stats[1:, 4] < population_min)[0] + 1
+    mask = np.zeros_like(dta)
+    mask[dta == noData] = 1.0
+    for cid in cid_minority:
+        mask[labels == cid] = 1.0
+
+    return mask.astype(np.bool)
+
+
+def SpatialTexture_masking(dta, num_range, threshold, noData=None):
+    dta_block = rolling_window_2D(dta, [2*num_range+1, 2*num_range+1])
+    dta_block_SD = np.nanstd(dta_block, axis=(-1, -2))
+    mask_SD = (dta_block_SD > threshold)
+
+    if noData is not None:
+        mask_nodata = (dta == noData)
+        mask = np.logical_or(mask_SD, mask_nodata[num_range:-num_range, num_range:-num_range])
+    else:
+        mask = mask_SD
+
+    mask = np.pad(mask, pad_width=(num_range, num_range), constant_values=(True, True))
+
+    return mask.astype(np.bool)
+
+
+def Spike_filter_2D(dta, num_range, threshold, noData=None):
+    if noData is not None:
+        dta = np.where(dta==noData, np.nan, dta)
+
+    dta_block = rolling_window_2D(dta, [2*num_range+1, 2*num_range+1])
+
+    dta_block_mean = np.nanmean(dta_block, axis=(-1, -2))
+    dta_block_central = dta_block[:, :, num_range, num_range]
+    dta_block_deviation = np.abs(dta_block_mean - dta_block_central)
+
+    dta_smooth = np.where(dta_block_deviation > threshold, dta_block_mean, dta_block_central)
+    dta[num_range:-num_range, num_range:-num_range] = dta_smooth
+
+    return dta
 
 
 # ************************* Visualization *************************
@@ -141,6 +194,9 @@ def plot_label(GateWidth_r, Phi_dp_array, labels):
 
 
 # ************************* Quality Control Algorithms *************************
+# ************* [0] Clutter Identification *************
+# ---Phi_dp unfolding (necessary for non-angular method)
+
 # ************* [1] Phase reconstruction *************
 # ---Phi_dp unfolding (necessary for non-angular method)
 def PhaseUnfolding(Phi_dp_array, rho_hv_array, GateWidth_array, max_phaseDiff=-80, dphase=180):
@@ -240,7 +296,7 @@ def PhaseRec_LP(Phi_dp_array, KDP_array, rho_hv_array, GateWidth_array, num_good
         for cid in range(1, n_cell + 1):
             cell_loc = np.nonzero(labels == cid)[0]
             Phi_dp_array[r, cell_loc] = LP_solver(Phi_dp_array[r, cell_loc])
-            array_split = rolling_window(Phi_dp_array[r, cell_loc], 5)
+            array_split = rolling_window_1D(Phi_dp_array[r, cell_loc], 5)
             KDP_array_r = (-0.2*array_split[:, 0] - 0.1*array_split[:, 1] + 0.1*array_split[:, 3] + 0.2*array_split[:, 4]) / w_r
             KDP_array[r, cell_loc] = np.concatenate(([KDP_array_r[0]], [KDP_array_r[0]], KDP_array_r, [KDP_array_r[-1]], [KDP_array_r[-1]]), axis=0)
 
@@ -257,11 +313,11 @@ def PhaseRec_fuzzy(reflectivity_array, zDr_array, Phi_dp_array, RhoHV_array, KDP
     loc_dic = {0: [0, 0], 60: [0, 1], 120: [1, 0], 180: [1, 1], 240: [2, 0], 300: [2, 1]}
 
     for r in range(0, num_radial):
-        zDr_std = np.std(rolling_window(zDr_array[r], num_sample), 1)
+        zDr_std = np.std(rolling_window_1D(zDr_array[r], num_sample), 1)
         zDr_std = np.concatenate(([zDr_std[0] for i in range(0, num_padding)], zDr_std, [zDr_std[-1] for i in range(0, num_padding)]), axis=0)
         mf_zDr = memFunc(zDr_std, fuzzy_dict["clutter"]["zDr_std"]["m"], fuzzy_dict["clutter"]["zDr_std"]["al"], fuzzy_dict["clutter"]["zDr_std"]["bl"],
                          fuzzy_dict["clutter"]["zDr_std"]["ar"], fuzzy_dict["clutter"]["zDr_std"]["br"])
-        phi_dp_std = np.std(rolling_window(Phi_dp_array[r], num_sample), 1)
+        phi_dp_std = np.std(rolling_window_1D(Phi_dp_array[r], num_sample), 1)
         phi_dp_std = np.concatenate(([phi_dp_std[0] for i in range(0, num_padding)], phi_dp_std, [phi_dp_std[-1] for i in range(0, num_padding)]), axis=0)
         mf_phi_dp = memFunc(phi_dp_std, fuzzy_dict["clutter"]["PhiDP_std"]["m"], fuzzy_dict["clutter"]["PhiDP_std"]["al"], fuzzy_dict["clutter"]["PhiDP_std"]["bl"],
                          fuzzy_dict["clutter"]["PhiDP_std"]["ar"], fuzzy_dict["clutter"]["PhiDP_std"]["br"])
@@ -350,51 +406,79 @@ def PhaseRec_GMM(Phi_dp_array, reflectivity_array, GateWidth_array):
 
 # ---reconstruct Phi_dp followed the method proposed by DROPs
 def dataMasking_DROPs(Phi_dp_array, GateWidth_array, rho_hv_array, num_good, num_bad, d_max, rho_max, population_min):
+    Phi_dp_array[Phi_dp_array == -2.0] = np.nan
     # ------calculate the dispersion of PhiDP
-    d_PhiDP_good = get_dispersion(rolling_window(Phi_dp_array, num_good), axis=1)
-    num_pad_s = int((num_good - 1) / 2)
-    num_pad_e = Phi_dp_array.shape[0] - num_pad_s - d_PhiDP_good.shape[0]
-    d_PhiDP_good = np.concatenate(([d_PhiDP_good[0] for i in range(0, num_pad_s)], d_PhiDP_good, [d_PhiDP_good[-1] for i in range(0, num_pad_e)]), axis=0)
+    d_PhiDP_good = get_dispersion(rolling_window_1D(Phi_dp_array, num_good), axis=1)
+    num_pad_good = int((num_good - 1) / 2)
 
-    d_PhiDP_bad = get_dispersion(rolling_window(Phi_dp_array, num_bad), axis=1)
-    num_pad_s = int((num_bad - 1) / 2)
-    num_pad_e = Phi_dp_array.shape[0] - num_pad_s - d_PhiDP_bad.shape[0]
-    d_PhiDP_bad = np.concatenate(([d_PhiDP_bad[0] for i in range(0, num_pad_s)], d_PhiDP_bad, [d_PhiDP_bad[-1] for i in range(0, num_pad_e)]), axis=0)
+    d_PhiDP_bad = get_dispersion(rolling_window_1D(Phi_dp_array, num_bad), axis=1)
+    num_pad_bad = int((num_bad - 1) / 2)
 
-    id_start = get_good_point(rolling_window(d_PhiDP_good, num_good), d_max, axis=1)
-    id_end = get_bad_point(rolling_window(d_PhiDP_bad, num_bad), rho_hv_array[:-num_bad+1], d_max, rho_max, axis=1)
+    # ------As for selection rules, please ref to
+    # Chen, Haonan, et al. “Urban Hydrological Applications of Dual-Polarization X-Band Radar: Case Study in Korea.”
+    # Journal of Hydrologic Engineering, vol. 22, no. 5, 2017.
+    id_start = get_good_point(d_PhiDP_good, d_max) + num_pad_good
+    id_end = get_bad_point(d_PhiDP_bad, rho_hv_array[num_pad_bad:-num_pad_bad], d_max, rho_max) + num_pad_bad
+
+    Phi_dp_array[np.isnan(Phi_dp_array)] = -2.0
 
     # ------rain cell segmentation
-    counter = 0
-    i_end_prev = 0
-    cell_id = 1
     labels = np.zeros_like(GateWidth_array)
-    num_start = len(id_start)
-    num_end = len(id_end)
-    while counter < num_start:
-        i_start = id_start[counter]
-        # --------search the index of the end position of this rain cell
-        counter = np.searchsorted(id_end, i_start, side="right")
-        # -----------stop if end index exceeds
-        if counter >= num_end:
-            break
-        else:
-            i_end = id_end[counter]
-            # ----------combine two neighbouring rain cells
-            if i_start - i_end_prev == 1:
-                # ----------assign the previous label
-                labels[i_start:i_end + 1] = cell_id - 1
-            else:
-                # ----------only keep rain cells which contain enough points
-                if i_end - i_start + 1 >= population_min:
-                    labels[i_start:i_end + 1] = cell_id
-                    cell_id += 1
-            # ----------update the previous end position
-            i_end_prev = i_end
-            # ----------search the index of the start position of the next rain cell
-            counter = np.searchsorted(id_start, i_end, side="right")
+    cell_id = 1
 
-    return labels
+    if len(id_end) == 0:
+        labels[id_start[0]:] = cell_id
+        return labels
+    else:
+        counter = 0
+        num_start = len(id_start)
+        num_end = len(id_end)
+        while counter < num_start:
+            i_start = id_start[counter]
+            # --------search the index of the end position of this rain cell
+            counter = np.searchsorted(id_end, i_start, side="right")
+            # -----------stop if end index exceeds
+            if counter >= num_end:
+                labels[i_start:] = cell_id
+                break
+            else:
+                i_end = id_end[counter]
+                labels[i_start:i_end + 1] = cell_id
+                cell_id += 1
+                counter = np.searchsorted(id_start, i_end, side="right")
+
+        id_test = np.where(labels == 0)[0]
+        check = id_test[1:] - id_test[:-1]
+        discontinuity_set = np.where(check > 1)[0]
+
+        if len(discontinuity_set) == 0:
+            if labels.shape[0] - id_test[-1] <= population_min:
+                labels[id_test[-1]:] = 0
+            else:
+                labels[id_test[-1]:] = 1
+            return labels
+        # --------if there are multiple discontinuous rain cells, let us refine them by joining and discarding
+        else:
+            # ----------combine two neighbouring rain cells
+            id_start = id_test[discontinuity_set] + 1
+            id_end = id_test[discontinuity_set + 1]
+
+            if id_test[-1] < labels.shape[0] and labels.shape[0] - id_test[-1] > population_min:
+                id_start = np.append(id_start, id_test[-1] + 1)
+                id_end = np.append(id_end, labels.shape[0])
+
+            cid = 1
+            labels_refined = np.zeros_like(labels)
+            for i in range(0, len(id_end)):
+                # ----------only keep rain cells which contain enough data points
+                if id_end[i] - id_start[i] + 1 > population_min:
+                    labels_refined[id_start[i]:id_end[i]] = cid
+                    cid += 1
+            return labels_refined
+
+
+def dataMasking_direct(Phi_dp_array, population_min):
+    pass
 
 
 def PhaseRec_DROPs(Phi_dp_array, GateWidth_array, rho_hv_array, KDP_array, num_good=15, num_bad=10, d_max=0.98, rho_max=0.9, population_min=5, masked=True):
@@ -448,7 +532,7 @@ def PhaseRec_DROPs(Phi_dp_array, GateWidth_array, rho_hv_array, KDP_array, num_g
             cell_sample = np.linspace(cell_loc[0]-num_pad_s, cell_loc[-1]+num_pad_e, cell_loc.shape[0]+num_sample-1).astype(np.int64)
             cell_sample = np.where(cell_sample < 0, 0, cell_sample)
             cell_sample = np.where(cell_sample >= Phi_dp_array[r].shape[0], Phi_dp_array[r].shape[0]-1, cell_sample)
-            W_inv_mat = get_invW(rolling_window(Phi_dp_array[r, cell_sample], num_sample), 1)
+            W_inv_mat = get_invW(rolling_window_1D(Phi_dp_array[r, cell_sample], num_sample), 1)
             # ---------calculate the weighting matrix Mq for the smoothness of fitting
             KDP_ini[KDP_ini < 0.1] = 0.1
             w_q = 1.0 / (2.0 * KDP_ini)
@@ -503,6 +587,8 @@ def PhaseRec_hybrid(Phi_dp_array, GateWidth_array, reflectivity_array, zDr_array
         labels = dataMasking_DROPs(Phi_dp_array[r], GateWidth_r, rho_hv_array[r], num_good, num_bad, d_max, rho_max, population_min)
         labels = labels.astype(np.int64)
 
+        # Phi_dp_array[r] = np.where(np.isnan(Phi_dp_array[r]), -2.0, Phi_dp_array[r])
+
         # mask non-rain cell
         if masked:
             mask_r = (labels == 0)
@@ -543,7 +629,7 @@ def PhaseRec_hybrid(Phi_dp_array, GateWidth_array, reflectivity_array, zDr_array
             KDP_lower = get_KDP_lower(KDP_ini, KDP_lower_est)
             KDP_higher = get_KDP_higher(KDP_higher_est, reflectivity_array[r, cell_loc])
             Phi_dp_array[r, cell_loc] = LP_solver_constraints(Phi_dp_array[r, cell_loc], w_r, KDP_lower, KDP_higher)
-            array_split = rolling_window(Phi_dp_array[r, cell_loc], 5)
+            array_split = rolling_window_1D(Phi_dp_array[r, cell_loc], 5)
             KDP_array_r = (-0.2 * array_split[:, 0] - 0.1 * array_split[:, 1] + 0.1 * array_split[:, 3] + 0.2 * array_split[:, 4]) / w_r
             KDP_array[r, cell_loc] = np.concatenate(([KDP_array_r[0]], [KDP_array_r[0]], KDP_array_r, [KDP_array_r[-1]], [KDP_array_r[-1]]), axis=0)
 
@@ -662,9 +748,7 @@ def correct_ZPHI(ZH_array, zDr_array, Phi_dp_array, GateWidth_array, r_start, c_
 
         
 if __name__ == "__main__":
-    raw_dir = "Input"
-    raw_fname = "BJXFS_2.5_20190909_180000.netcdf"
-    nc_ds = nc.Dataset(os.path.join(raw_dir, raw_fname), "r")
+    nc_ds = nc.Dataset("*******dataset_path*******", "r")
 
     # convert mm to km
     GateWidth = np.array(nc_ds.variables["GateWidth"]) / 1000.0 / 1000.0
@@ -676,14 +760,25 @@ if __name__ == "__main__":
 
     temperature = np.zeros_like(reflectivity)
 
-    # Phi_dp_unfold = PhaseUnfolding(Phi_dp, rho_hv, GateWidth, max_phaseDiff=-180, dphase=360)
-    # Phi_dp_rec, Kdp_rec = PhaseRec_LP(Phi_dp, KDP, rho_hv, GateWidth)
-    # Phi_dp_rec = PhaseRec_GMM(Phi_dp, reflectivity, GateWidth)
-    # PhaseRec_fuzzy(reflectivity, zDr, Phi_dp, rho_hv, KDP, temperature, GateWidth)
-    # Phi_dp_rec, Kdp_rec = PhaseRec_DROPs(Phi_dp, GateWidth, rho_hv, KDP, d_max=0.97, rho_max=0.7, population_min=10)
-    Phi_dp_rec, Kdp_rec = PhaseRec_hybrid(Phi_dp, GateWidth, reflectivity, zDr, rho_hv, KDP, [7.1827e-5, 1.1339, -3.3701], d_max=0.97, rho_max=0.9, population_min=10)
+    mask_Phi_dp = SpatialTexture_masking(Phi_dp, num_range=2, threshold=5.0, noData=-2.0)
+    mask_zDr = SpatialTexture_masking(zDr, num_range=2, threshold=1.0, noData=-8.125)
+    mask = np.logical_and(np.logical_and(mask_Phi_dp, mask_zDr), rho_hv < 0.9)
+    Phi_dp[mask] = -2.0
 
+    mask = ConnectedComponent_masking(Phi_dp, noData=-2.0, population_min=30)
+    Phi_dp[mask] = -2.0
+
+    reflectivity[Phi_dp == -2.0] = -33.0
+    KDP[Phi_dp == -2.0] = -5.0
+    rho_hv[Phi_dp == -2.0] = -0.025
+    zDr[Phi_dp == -2.0] = -0.625
+
+    Phi_dp_rec, Kdp_rec = PhaseRec_hybrid(Phi_dp, GateWidth, reflectivity, zDr, rho_hv, KDP, [7.1827e-5, 1.1339, -3.3701], d_max=0.97, rho_max=0.7, population_min=5)
+ 
+    id_test = np.logical_and(Phi_dp_rec <= 0.0, Phi_dp_rec != -2.0)
+    Phi_dp_rec[id_test] = 0.0
+  
     num_radial, num_gate = Phi_dp.shape
     GateWidth_cum = np.full(num_gate, GateWidth[0])
     GateWidth_cum = np.cumsum(GateWidth_cum)
-    ppi_vis(Kdp_rec, "hybrid_KDP.png", range=GateWidth_cum, title="Hybrid-processed $K_{dp}$ at 2019/09/09 18:00:00", colorbar_label="$K_{dp}$ [Degrees/$\mathrm{km}$]", noData=-5.0)
+    ppi_vis(Phi_dp_rec, "Phi_dp_SD+CC+Hybrid.png", "DifferentialPhase", range=GateWidth_cum, title="SD+CC+Hybrid-processed $\Phi_{dp}$ at 2019/09/09 18:00:00", colorbar_label="$\Phi_{dp}$ [Degrees]")
