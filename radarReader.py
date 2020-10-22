@@ -453,6 +453,21 @@ def exportToPNG(nc_dir, export_dir, field="Reflectivity", scale=1.0):
 
 
 if __name__ == "__main__":
+	'''
+	# [1] Radar Raw Data -> NetCDF Dataset (batch processing)
+	dta_dir = "*******Write Your Directory of Radar Raw Data which ends with .AR2 Here*******"
+	for f in os.listdir(dta_dir):
+		if f.endswith(".AR2"):
+			num_gate = 1000
+			elev_id = 3
+			newNetCDFFile = "_".join(f.split(".")[:-1]) + "_" + str(elev_id) + "_" + str(num_gate) + ".nc"
+			newNetCDFFile = os.path.join("Temp", newNetCDFFile)
+			site, task, elev, rad, data_pol = MetSTARDataReader(os.path.join(dta_dir, f))
+			DROPsNetCDFGen(newNetCDFFile, site, task, elev, rad, data_pol, num_gate=num_gate, elev_id=elev_id)
+	'''
+	
+	'''
+	# [2] NetCDF Dataset after Quality Control -> NetCDF Dataset cliped by a specified bounding box (batch processing)
 	for f in os.listdir("Temp"):
 		if f.startswith("QC"):
 			station_name = f.split("_")[1]
@@ -460,5 +475,4 @@ if __name__ == "__main__":
 			t = f.split("_")[3]
 			save_path = os.path.join("Temp_Output", "THU_"+d+"_"+t+"_"+station_name+".nc")
 			getRadarDataByExtent(radar_nc_path=os.path.join("Temp", f), save_path=save_path, extent=[116.297059, 116.344256, 39.983916, 40.020212])
-
-	exportToPNG("Temp_Output", "Temp_Output", field="Reflectivity", scale=1.0)
+	'''
