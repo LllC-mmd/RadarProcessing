@@ -1,12 +1,3 @@
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.colors as pcolor
-
-import netCDF4 as nc
-import wradlib as wrl
-
-
 def ppi_vis(pol_var, save_path, var_name, range=None, azimuth=None, title=None, colorbar_label=None, cmap=None, norm=None, noData=None):
     if noData is None:
         if var_name == "DifferentialPhase":
@@ -15,6 +6,8 @@ def ppi_vis(pol_var, save_path, var_name, range=None, azimuth=None, title=None, 
             noData = -5.0
         elif var_name == "Reflectivity":
             noData = -33.0
+        elif var_name == "CrossPolCorrelation":
+            noData = -0.025
         else:
             raise NotImplementedError("Unknown Variable")
 
@@ -44,6 +37,12 @@ def ppi_vis(pol_var, save_path, var_name, range=None, azimuth=None, title=None, 
                                [251 / 255, 144 / 255, 37 / 255], [249 / 255, 14 / 255, 28 / 255], [209 / 255, 11 / 255, 21 / 255],
                                [189 / 255, 8 / 255, 19 / 255], [219 / 255, 102 / 255, 252 / 255], [186 / 255, 36 / 255, 235 / 255]])
             nvals = np.linspace(0.0, 75.0, 16)
+        elif var_name == "CrossPolCorrelation":
+            colors = np.array([[29 / 255, 175 / 255, 243 / 255], [10 / 255, 35 / 255, 244 / 255], [30 / 255, 199 / 255, 34 / 255],
+                               [19 / 255, 144 / 255, 22 / 255], [254 / 255, 253 / 255, 56 / 255], [251 / 255, 144 / 255, 37 / 255],
+                               [249 / 255, 14 / 255, 28 / 255], [189 / 255, 8 / 255, 19 / 255], [219 / 255, 102 / 255, 252 / 255],
+                               [186 / 255, 36 / 255, 235 / 255]])
+            nvals = np.linspace(0.0, 1.0, 11)
         else:
             raise NotImplementedError("Unknown Variable")
 
