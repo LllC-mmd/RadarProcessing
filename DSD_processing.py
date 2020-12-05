@@ -8,19 +8,54 @@ from sklearn import metrics
 import matplotlib.pyplot as plt
 
 
-def AH_KDP_fitting(csv_data, AH_field="Ah", KDP_field="Kdp", img_saved=True):
+'''
+############################ Naming Convention ############################
+Uppercase for the radar variables in the dB scale
+Lowercase for the radar variables in the linear scale
+i.e., we have ZH = 10 * log10(Zh) [dBZ]
+###########################################################################
+'''
+
+def AH_ZH_fitting(csv_data, AH_field="Ah", ZH_field="Zh", img_saved=True):
     df = pd.read_csv(csv_data)
-
     ah = np.array(df[AH_field])
-    kdp = np.array(df[KDP_field])
-    kdp = kdp[:, np.newaxis]
-    a, _, _, _ = np.linalg.lstsq(kdp, ah)
+    ah_lg = np.log10(ah)
+    ZH = np.array(df[ZH_field]) / 10.0
+    ZH = ZH[:, np.newaxis]
 
-    r2 = metrics.r2_score(y_true=ah, y_pred=a[0]*kdp)
+    x_var = np.concatenate((np.ones_like(ZH), ZH), axis=1)
+    a, _, _, _ = np.linalg.lstsq(x_var, ah_lg)
+
+    ah_pred = np.power(10.0, a[0]+a[1]*ZH)
+    ah_compare = np.concatenate((ah.reshape(1, -1), ah_pred.reshape(1, -1)), axis=0)
+    cov = np.cov(ah_compare)
+    corr = cov[1, 0] / np.sqrt(cov[0, 0] * cov[1, 1])
 
     if img_saved:
         fig, ax = plt.subplots(figsize=(10, 8))
-        ax.scatter(kdp, ah, s=1, c="navy")
+        ax.scatter(ah, ah_pred, s=1, c="navy")
+        ax.plot(ah, ah, color="red", zorder=1)
+        ax.set_ylabel("$A_{\mathrm{h}}$ (dBZ$\cdot \mathrm{km}^{-1}$) est.", size='large', rotation=90)
+        ax.set_xlabel("$K_{\mathrm{DP}}$ (deg$\cdot \mathrm{km}^{-1}$)", size='large')
+        ax.set_title("$A_{\mathrm{h}}$=%.4e$\cdot Z_{\mathrm{h}}^{%.4f}$ (CORR=%.4f)" % (10.0**a[0], a[1], corr), fontsize='x-large')
+        ax.legend(fontsize='large', loc=2)
+        # plt.show()
+        plt.savefig("Ah_Zh.png", dpi=400)
+
+
+def AH_KDP_fitting(csv_data, AH_field="Ah", KDP_field="Kdp", img_saved=True):
+    df = pd.read_csv(csv_data)
+
+    AH = np.array(df[AH_field])
+    kdp = np.array(df[KDP_field])
+    kdp = kdp[:, np.newaxis]
+    a, _, _, _ = np.linalg.lstsq(kdp, AH)
+
+    r2 = metrics.r2_score(y_true=AH, y_pred=a[0]*kdp)
+
+    if img_saved:
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.scatter(kdp, AH, s=1, c="navy")
         ax.plot(kdp, a[0]*kdp, color="red", zorder=1, label="$A_{\mathrm{H}}$=%.4f$\cdot K_{\mathrm{DP}}$" % a[0])
         ax.set_ylabel("$A_{\mathrm{H}}$ (dBZ$\cdot \mathrm{km}^{-1}$)", size='large', rotation=90)
         ax.set_xlabel("$K_{\mathrm{DP}}$ (deg$\cdot \mathrm{km}^{-1}$)", size='large')
@@ -32,16 +67,16 @@ def AH_KDP_fitting(csv_data, AH_field="Ah", KDP_field="Kdp", img_saved=True):
 
 def ADR_KDP_fitting(csv_data, ADR_field="Ahv", KDP_field="Kdp", img_saved=True):
     df = pd.read_csv(csv_data)
-    adr = np.array(df[ADR_field])
+    ADR = np.array(df[ADR_field])
     kdp = np.array(df[KDP_field])
     kdp = kdp[:, np.newaxis]
-    a, _, _, _ = np.linalg.lstsq(kdp, adr)
+    a, _, _, _ = np.linalg.lstsq(kdp, ADR)
 
-    r2 = metrics.r2_score(y_true=adr, y_pred=a[0] * kdp)
+    r2 = metrics.r2_score(y_true=ADR, y_pred=a[0] * kdp)
 
     if img_saved:
         fig, ax = plt.subplots(figsize=(10, 8))
-        ax.scatter(kdp, adr, s=1, c="navy")
+        ax.scatter(kdp, ADR, s=1, c="navy")
         ax.plot(kdp, a[0] * kdp, color="red", zorder=1, label="$A_{\mathrm{DR}}$=%.4f$\cdot K_{\mathrm{DP}}$" % a[0])
         ax.set_ylabel("$A_{\mathrm{DR}}$ (dB$\cdot \mathrm{km}^{-1}$)", size='large', rotation=90)
         ax.set_xlabel("$K_{\mathrm{DP}}$ (deg$\cdot \mathrm{km}^{-1}$)", size='large')
@@ -59,17 +94,15 @@ def KDP_constraints(csv_data, KDP_field="Kdp", ZH_field="Zh", AH_field="Ah", ZDR
     df = pd.read_csv(csv_data)
     kdp = np.array(df[KDP_field])
     kdp_lg = np.log10(kdp)
-    zh = np.array(df[ZH_field] + df[AH_field]) / 10.0
-    zh = zh[:, np.newaxis]
+    ZH = np.array(df[ZH_field] + df[AH_field]) / 10.0
+    ZH = ZH[:, np.newaxis]
     zdr = np.array(df[ZDR_field] + df[ADR_field]) / 10.0
     zdr = zdr[:, np.newaxis]
 
-    x_var = np.concatenate((np.ones_like(zdr), zh, zdr), axis=1)
+    x_var = np.concatenate((np.ones_like(zdr), ZH, zdr), axis=1)
     a, _, _, _ = np.linalg.lstsq(x_var, kdp_lg, rcond=-1)
 
     kdp_pred = np.power(10, np.dot(x_var, a))
-    #kdp_pred = np.log10(kdp_pred)
-    #kdp = np.log10(kdp)
     kdp_compare = np.concatenate((kdp.reshape(1, -1), kdp_pred.reshape(1, -1)), axis=0)
     cov = np.cov(kdp_compare)
     corr = cov[1, 0] / np.sqrt(cov[0, 0] * cov[1, 1])
@@ -87,10 +120,3 @@ def KDP_constraints(csv_data, KDP_field="Kdp", ZH_field="Zh", AH_field="Ah", ZDR
         ax.set_aspect('equal')
         # plt.show()
         plt.savefig("KDP_ZDR_ZH.png", dpi=400)
-
-
-if __name__ == "__main__":
-    csv_loc = os.path.join("data", "ahvgetforXband.csv")
-    # AH_KDP_fitting(csv_loc)
-    # ADR_KDP_fitting(csv_loc)
-    KDP_constraints(csv_loc)
