@@ -2,15 +2,11 @@ import numpy as np
 import scipy.optimize as opt
 import scipy.integrate as integrate
 import cv2
-import matplotlib.pyplot as plt
-import matplotlib.pylab as plb
-import matplotlib.patches as mpatches
 
 import netCDF4 as nc
 import os
 
 import pulp as pl
-from sklearn.mixture import GaussianMixture as GMM
 
 from radarVis import *
 
@@ -53,13 +49,19 @@ def memFunc(x, m, al, bl, ar=None, br=None):
     return mf
 
 
-def get_dispersion(dta, axis=None, deg=True):
+def get_dispersion(dta, axis=None, deg=True, nan_threshold=0.6):
     # ------If Phi_dp is represented in Degrees, convert it into Radian representation first
     if deg:
         dta = dta * np.pi / 180.0
     dta_c = np.cos(dta)
     dta_s = np.sin(dta)
-    return np.sqrt(np.nanmean(dta_c, axis=axis)**2 + np.nanmean(dta_s, axis=axis)**2)
+
+    dispersion_raw = np.sqrt(np.nanmean(dta_c, axis=axis)**2 + np.nanmean(dta_s, axis=axis)**2)
+
+    nan_count = np.sum(~np.isnan(dta), axis=-1) / dta.shape[-1]
+    dispersion_raw[nan_count < nan_threshold] = np.nan
+
+    return dispersion_raw
 
 
 def get_good_point(dispersion, d_max, axis=None):
@@ -98,10 +100,10 @@ def complex2deg(complex_array):
     return np.where(deg_array < 0.0, deg_array + 2*180.0, deg_array)
 
 
-def ConnectedComponent_masking(dta, noData, population_min=30):
+def ConnectedComponent_masking(dta, noData, population_min=30, nc=8):
     img_gray = np.full_like(dta, 255)
     img_gray[dta==noData] = 0
-    num_labels, labels, stats, centers = cv2.connectedComponentsWithStats(img_gray.astype('uint8'), connectivity=8, ltype=cv2.CV_32S)
+    num_labels, labels, stats, centers = cv2.connectedComponentsWithStats(img_gray.astype('uint8'), connectivity=nc, ltype=cv2.CV_32S)
 
     cid_minority = np.where(stats[1:, 4] < population_min)[0] + 1
     mask = np.zeros_like(dta)
@@ -145,31 +147,6 @@ def Spike_filter_2D(dta, num_range, threshold, noData=None):
 
 
 # ************************* Visualization *************************
-def draw_ellipse(pos, covariance, ax=None, **kwargs):
-    # Convert covariance to principal axes
-    if covariance.shape == (2, 2):
-        U, sig_Val, Vt = np.linalg.svd(covariance)
-        angle = np.degrees(np.arctan2(U[1, 0], U[0, 0]))
-        width, height = 2.0 * np.sqrt(2.0) * np.sqrt(sig_Val)
-    else:
-        angle = 0
-        width, height = 2.0 * np.sqrt(2.0) * np.sqrt(covariance)
-
-    ax.add_patch(mpatches.Ellipse(pos, width, height, angle, **kwargs))
-
-
-def plot_gmm(gmm_model, X, label=True, ax=None):
-    labels = gmm_model.fit(X).predict(X)
-    if label:
-        ax.scatter(X[:, 0], X[:, 1], c=labels, s=40, cmap='viridis', zorder=2)
-    else:
-        ax.scatter(X[:, 0], X[:, 1], s=40, zorder=2)
-
-    w_factor = 0.2 / gmm_model.weights_.max()
-    for pos, covar, w in zip(gmm_model.means_, gmm_model.covars_, gmm_model.weights_):
-        draw_ellipse(pos, covar, alpha=w * w_factor)
-
-
 def plot_label(GateWidth_r, Phi_dp_array, labels):
     fig, ax = plt.subplots(3, 2, figsize=(10, 12))
     loc_dic = {0: [0, 0], 60: [0, 1], 120: [1, 0], 180: [1, 1], 240: [2, 0], 300: [2, 1]}
@@ -235,8 +212,11 @@ def PhaseUnfolding(Phi_dp_array, rho_hv_array, GateWidth_array, max_phaseDiff=-8
 
 
 # ---reconstruct Phi_dp using Linear Programming
-def LP_solver(Phi_dp_array):
-    num_gate = Phi_dp_array.shape[0]
+def LP_solver(Phi_dp_array, weights=None):
+    if weights is None:
+        weights = np.ones_like(Phi_dp_array)
+
+    num_gate = len(Phi_dp_array)
 
     # ------define the Problem object
     lp_prob = pl.LpProblem("Reconstruction", pl.LpMinimize)
@@ -245,16 +225,22 @@ def LP_solver(Phi_dp_array):
     x = ["x" + str(i) for i in range(0, num_gate)]
     var = z + x
     lp_var = pl.LpVariable.dicts("var", var, cat='Continuous')
+
     # ------define the objective function
-    lp_prob += pl.lpSum([lp_var[var[i]] for i in range(0, num_gate)])
-    # ------add the fidelity constraints
+    gate_used = np.where(weights != 0.0)[0]
+    lp_prob += pl.lpSum([lp_var[var[i]] for i in gate_used])
+
     for i in range(0, num_gate):
-        lp_prob += lp_var[var[i]] - lp_var[var[i + num_gate]] >= -Phi_dp_array[i]
-    for i in range(0, num_gate):
-        lp_prob += lp_var[var[i]] + lp_var[var[i + num_gate]] >= Phi_dp_array[i]
-    # ------add the montonicity constraints via five-point Savitzky–Golay derivative filter
-    for i in range(num_gate + 2, 2 * num_gate - 2):
-        lp_prob += -0.2 * lp_var[var[i-2]] + (-0.1) * lp_var[var[i-1]] + 0.1 * lp_var[var[i+1]] + 0.2 * lp_var[var[i+2]] >= 0.0
+        if weights[i] != 0:
+            # ------add the fidelity constraints
+            lp_prob += weights[i] * (lp_var[var[i]] - lp_var[var[i + num_gate]]) >= -Phi_dp_array[i]
+            lp_prob += weights[i] * (lp_var[var[i]] + lp_var[var[i + num_gate]]) >= Phi_dp_array[i]
+
+    for i in range(num_gate + 2, 2*num_gate - 2):
+        w_i = weights[i-num_gate]
+        if w_i != 0:
+            # ------add the montonicity constraints via five-point Savitzky–Golay derivative filter
+            lp_prob += w_i * (-0.2*lp_var[var[i-2]] + (-0.1)*lp_var[var[i-1]] + 0.1*lp_var[var[i+1]] + 0.2*lp_var[var[i+2]]) >= 0.0
 
     # ------solve the LP problem
     # ---------use GNU Linear Programming Kit solver
@@ -264,17 +250,17 @@ def LP_solver(Phi_dp_array):
     # ------check the status of solution
     if lp_prob.status == 1:
         phi_rec = np.array([lp_var[var[i]].varValue for i in range(num_gate, 2*num_gate)])
+        phi_rec[np.equal(phi_rec, None)] = np.nan
         # ------smoothing filter to prevent subﬁlter-length oscillations
-        Phi_dp_array[2:num_gate-2] = 0.1 * phi_rec[0:num_gate-4] + 0.25 * phi_rec[1:num_gate-3] + 0.3 * phi_rec[2:num_gate-2] + 0.25 * phi_rec[3:num_gate-1] + 0.1 * phi_rec[4:num_gate]
-        Phi_dp_array[num_gate-2] = Phi_dp_array[num_gate-3]
-        Phi_dp_array[num_gate-1] = Phi_dp_array[num_gate-3]
+        Phi_dp_array[2:-2] = 0.1*phi_rec[0:-4] + 0.25*phi_rec[1:-3] + 0.3*phi_rec[2:-2] + 0.25*phi_rec[3:-1] + 0.1*phi_rec[4:]
+        Phi_dp_array[-2:] = Phi_dp_array[-3]
     else:
         print("Linear Programming failed !!!")
 
     return Phi_dp_array
 
 
-def PhaseRec_LP(Phi_dp_array, KDP_array, rho_hv_array, GateWidth_array, num_good=15, num_bad=10, d_max=0.98, rho_max=0.9, population_min=5, masked=True):
+def PhaseRec_LP(Phi_dp_array, KDP_array, rho_hv_array, GateWidth_array, num_good=10, num_bad=5, d_max=0.98, rho_max=0.9, population_min=5, masked=True):
     num_radial, num_gate = Phi_dp_array.shape
 
     for r in range(0, num_radial):
@@ -303,14 +289,40 @@ def PhaseRec_LP(Phi_dp_array, KDP_array, rho_hv_array, GateWidth_array, num_good
     return Phi_dp_array, KDP_array
 
 
+def PhaseRec_LP_mask(Phi_dp_array, KDP_array, rho_hv_array, GateWidth_array, num_good=10, num_bad=5, d_max=0.98, rho_max=0.9, population_min=5, masked=True):
+    num_radial, num_gate = Phi_dp_array.shape
+
+    for r in range(0, num_radial):
+        # ------rain cell segmentation
+        w_r = GateWidth_array[r]
+        GateWidth_r = np.full(num_gate, w_r)
+        GateWidth_r = np.cumsum(GateWidth_r)
+        labels = dataMasking_DROPs(Phi_dp_array[r], GateWidth_r, rho_hv_array[r], num_good, num_bad, d_max, rho_max, population_min)
+        labels = labels.astype(np.int64)
+
+        weights = np.ones_like(Phi_dp_array[r])
+
+        # mask non-rain cell, i.e., Non-Precipitation Echoes (NPE)
+        if masked:
+            mask_r = (labels == 0)
+            weights[mask_r] = 0.0
+            Phi_dp_array[r, mask_r] = -2.0
+            KDP_array[r, mask_r] = -5.0
+
+        # ------use Linear Programming for one radial observation excluding NPE
+        Phi_dp_array[r] = LP_solver(Phi_dp_array[r], weights=weights)
+        array_split = rolling_window_1D(Phi_dp_array[r], 5)
+        KDP_array_r = (-0.2*array_split[:, 0] - 0.1*array_split[:, 1] + 0.1*array_split[:, 3] + 0.2*array_split[:, 4]) / w_r
+        KDP_array[r] = np.concatenate(([KDP_array_r[0]], [KDP_array_r[0]], KDP_array_r, [KDP_array_r[-1]], [KDP_array_r[-1]]), axis=0)
+
+    return Phi_dp_array, KDP_array
+
+
 # ---reconstruct Phi_dp using Fuzzy Logic
 def PhaseRec_fuzzy(reflectivity_array, zDr_array, Phi_dp_array, RhoHV_array, KDP_array, T_array):
     num_radial, num_gate = Phi_dp_array.shape
     num_sample = 11
     num_padding = int((num_sample-1)/2)
-
-    fig, ax = plt.subplots(3, 2, figsize=(10, 12))
-    loc_dic = {0: [0, 0], 60: [0, 1], 120: [1, 0], 180: [1, 1], 240: [2, 0], 300: [2, 1]}
 
     for r in range(0, num_radial):
         zDr_std = np.std(rolling_window_1D(zDr_array[r], num_sample), 1)
@@ -331,77 +343,6 @@ def PhaseRec_fuzzy(reflectivity_array, zDr_array, Phi_dp_array, RhoHV_array, KDP
         KDP_array[r, clutter_loc] = -5.0
 
     return Phi_dp_array, KDP_array
-
-
-# ---reconstruct Phi_dp using Gaussian Mixture Model
-def PhaseRec_GMM(Phi_dp_array, reflectivity_array, GateWidth_array):
-    num_radial, num_gate = Phi_dp_array.shape
-
-    zH_limit = 40.0
-    ratio_low = 15.0
-    sigma_low = 4.0
-    ratio_high = 50.0
-    sigma_high = 6.0
-
-    # ------define the Gaussian Mixture Model
-    n_model = 11
-    gmm_model_list = [GMM(n_components=int(i), covariance_type="diag", init_params="kmeans", n_init=3) for i in np.linspace(5, 25, 11)]
-
-    fig, ax = plt.subplots(3, 2, figsize=(10, 12))
-    loc_dic = {0: [0, 0], 60: [0, 1], 120: [1, 0], 180: [1, 1], 240: [2, 0], 300: [2, 1]}
-
-    for r in range(0, num_radial):
-        w_r = GateWidth_array[r]
-        GateWidth_r = np.full(num_gate, w_r)
-        GateWidth_r = np.cumsum(GateWidth_r)
-        dp_r = np.concatenate((GateWidth_r.reshape(-1, 1), Phi_dp_array[r].reshape(-1, 1)), axis=1)
-        # ------Data masking
-        # ---------select the best GMM via the Bayesian Information Criteria
-        bic_min = np.infty
-        m_id = 0
-        for i in range(0, n_model):
-            gmm_model_list[i].fit(dp_r)
-            bic_r = gmm_model_list[i].bic(dp_r)
-            if bic_r < bic_min:
-                m_id = i
-                bic_min = bic_r
-        # ---------mask out the clusters with no more than 5 points
-        labels = gmm_model_list[m_id].predict(dp_r)
-        label_count = np.bincount(labels)
-        label_mask = np.nonzero(label_count <= 5)[0]
-        # ---------mask out the clusters with too high sigma(phi_dp)
-        for l in range(0, len(label_count)):
-            if (len(label_mask) == 0) or (len(label_mask) > 0 and l not in label_mask):
-                loc = np.nonzero(labels == l)
-                zH_mean = np.mean(reflectivity_array[r, loc])
-                sigma_r = np.std(GateWidth_r[loc])
-                sigma_phi_dp = np.std(Phi_dp_array[r, loc])
-                if zH_mean < zH_limit:
-                    if sigma_phi_dp / sigma_r >= ratio_low or sigma_phi_dp >= sigma_low:
-                        label_mask = np.append(label_mask, l)
-                else:
-                    if sigma_phi_dp / sigma_r >= ratio_high or sigma_phi_dp >= sigma_high:
-                        label_mask = np.append(label_mask, l)
-
-        if r in loc_dic.keys():
-            ir, jr = loc_dic[r]
-            n_color = len(label_count) - len(label_mask)
-            cmap = plb.get_cmap("jet", n_color)
-            counter = 0
-            for l in range(0, len(label_count)):
-                loc = np.nonzero(labels == l)
-                if (len(label_mask) == 0) or (len(label_mask) > 0 and l not in label_mask):
-                    ax[ir, jr].scatter(GateWidth_r[loc], Phi_dp_array[r, loc], c=[cmap(counter)], label=l, s=5)
-                    counter += 1
-                else:
-                    ax[ir, jr].scatter(GateWidth_r[loc], Phi_dp_array[r, loc], c="darkgrey", label=l, s=5)
-            ax[ir, jr].set_title("No. Radial = %d" % r)
-            ax[ir, jr].legend(fontsize="small", ncol=4)
-            print(r, label_mask)
-    #plt.show()
-    plt.savefig("GMM_masking.png", dpi=400)
-
-    return Phi_dp_array
 
 
 # ---reconstruct Phi_dp followed the method proposed by DROPs
@@ -636,8 +577,77 @@ def PhaseRec_hybrid(Phi_dp_array, GateWidth_array, reflectivity_array, zDr_array
     return Phi_dp_array, KDP_array
 
 
-def LP_solver_constraints(Phi_dp_array, width, KDP_lower_bound, KDP_higher_bound):
-    num_gate = Phi_dp_array.shape[0]
+def PhaseRec_hybrid_mask(Phi_dp_array, GateWidth_array, reflectivity_array, zDr_array, rho_hv_array, KDP_array, kdp_zh_zdr_para, num_good=10, num_bad=5, d_max=0.98, rho_max=0.9, population_min=5, masked=True):
+    num_radial, num_gate = Phi_dp_array.shape
+    # ------KDP = c * Zh^alpha * Zdr^beta
+    c, alpha, beta = kdp_zh_zdr_para
+
+    for r in range(0, num_radial):
+        # ------rain cell segmentation
+        w_r = GateWidth_array[r]
+        GateWidth_r = np.full(num_gate, w_r)
+        GateWidth_r = np.cumsum(GateWidth_r)
+        labels = dataMasking_DROPs(Phi_dp_array[r], GateWidth_r, rho_hv_array[r], num_good, num_bad, d_max, rho_max, population_min)
+        labels = labels.astype(np.int64)
+
+        weights = np.ones_like(Phi_dp_array[r])
+        KDP_higher = np.full_like(Phi_dp_array[r], -5.0)
+        KDP_lower = np.full_like(Phi_dp_array[r], -5.0)
+
+        # mask non-rain cell
+        if masked:
+            mask_r = (labels == 0)
+            weights[mask_r] = 0.0
+            Phi_dp_array[r, mask_r] = -2.0
+            KDP_array[r, mask_r] = -5.0
+
+        # ------use Linear Programming with KDP constraints in every rain cell
+        n_cell = len(np.bincount(labels)) - 1
+        for cid in range(1, n_cell + 1):
+            cell_loc = np.nonzero(labels == cid)[0]
+            # ---------run non-adaptive fitting proposed by DROPs first to obtain the overall trend of the Kdp proﬁle
+            h_vec = np.full(cell_loc.shape[0], w_r)
+            Phi_dp_i = np.cos(Phi_dp_array[r, cell_loc]/180.0*np.pi) + 1.0j * np.sin(Phi_dp_array[r, cell_loc]/180.0*np.pi)
+            val_lambda = 0.1 * w_r
+            p_vec = np.full(cell_loc.shape[0] - 2, 4 * w_r)
+            M_mat = np.diag(p_vec) + np.diag(h_vec[1:-2], k=1) + np.diag(h_vec[1:-2], k=-1)
+            l_vec = 3.0 / h_vec[:-1]
+            u_vec = -l_vec[1:] - l_vec[:-1]
+            Q_mat = np.diag(l_vec[:-1]) + np.diag(u_vec[:-1], k=1) + np.diag(l_vec[1:-2], k=2)
+            Q_last_col = np.zeros((Q_mat.shape[0], 1))
+            Q_mat = np.concatenate((Q_mat, Q_last_col, Q_last_col), axis=1)
+            Q_mat[-1, -1] = l_vec[-1]
+            Q_mat[-2, -2] = l_vec[-2]
+            Q_mat[-1, -2] = u_vec[-1]
+            b_ini = np.linalg.inv(M_mat + 2.0 / 3.0 / val_lambda * np.dot(Q_mat, np.transpose(Q_mat)))
+            b_ini = np.dot(np.dot(b_ini, Q_mat), Phi_dp_i)
+            d_ini = Phi_dp_i - 2.0 / 3.0 / val_lambda * np.dot(np.transpose(Q_mat), b_ini)
+            b_ini = np.concatenate(([0], b_ini, [0]), axis=0)
+            c_ini = (d_ini[1:] - d_ini[:-1]) / h_vec[:-1] - (b_ini[1:] + 2.0 * b_ini[:-1]) * h_vec[:-1] / 3.0
+            KDP_ini = 0.5 * np.imag(c_ini / d_ini[:-1])
+            KDP_ini = np.concatenate((KDP_ini, [KDP_ini[-1]]), axis=0)
+            # ---------determine the lower and higher bound of KDP using KDP_ini, KDP estimated from ZH and ZDR
+            Zh_sample = np.power(10, reflectivity_array[r, cell_loc]/10.0)
+            Zdr_sample = np.power(10, zDr_array[r, cell_loc]/10.0)
+            KDP_est = c * np.power(Zh_sample, alpha) * np.power(Zdr_sample, beta)
+            KDP_lower_est = (1 - 0.25) * KDP_est
+            KDP_higher_est = (1 + 0.25) * KDP_est
+            KDP_lower[cell_loc] = get_KDP_lower(KDP_ini, KDP_lower_est)
+            KDP_higher[cell_loc] = get_KDP_higher(KDP_higher_est, reflectivity_array[r, cell_loc])
+
+        Phi_dp_array[r] = LP_solver_constraints(Phi_dp_array[r], w_r, KDP_lower, KDP_higher, weights)
+        array_split = rolling_window_1D(Phi_dp_array[r], 5)
+        KDP_array_r = (-0.2*array_split[:, 0] - 0.1*array_split[:, 1] + 0.1*array_split[:, 3] + 0.2*array_split[:, 4]) / w_r
+        KDP_array[r] = np.concatenate(([KDP_array_r[0]], [KDP_array_r[0]], KDP_array_r, [KDP_array_r[-1]], [KDP_array_r[-1]]), axis=0)
+
+    return Phi_dp_array, KDP_array
+
+
+def LP_solver_constraints(Phi_dp_array, width, KDP_lower_bound, KDP_higher_bound, weights=None):
+    if weights is None:
+        weights = np.ones_like(Phi_dp_array)
+
+    num_gate = len(Phi_dp_array)
 
     # ------define the Problem object
     lp_prob = pl.LpProblem("Reconstruction_SC", pl.LpMinimize)
@@ -646,20 +656,26 @@ def LP_solver_constraints(Phi_dp_array, width, KDP_lower_bound, KDP_higher_bound
     x = ["x" + str(i) for i in range(0, num_gate)]
     var = z + x
     lp_var = pl.LpVariable.dicts("var", var, cat='Continuous')
+
     # ------define the objective function
-    lp_prob += pl.lpSum([lp_var[var[i]] for i in range(0, num_gate)])
-    # ------add the fidelity constraints
+    gate_used = np.where(weights != 0.0)[0]
+    lp_prob += pl.lpSum([lp_var[var[i]] for i in gate_used])
+
     for i in range(0, num_gate):
-        lp_prob += lp_var[var[i]] - lp_var[var[i + num_gate]] >= -Phi_dp_array[i]
-    for i in range(0, num_gate):
-        lp_prob += lp_var[var[i]] + lp_var[var[i + num_gate]] >= Phi_dp_array[i]
-    # ------add the montonicity constraints via five-point Savitzky–Golay derivative filter
-    for i in range(num_gate + 2, 2 * num_gate - 2):
-        lp_prob += -0.2 * lp_var[var[i-2]] + (-0.1) * lp_var[var[i-1]] + 0.1 * lp_var[var[i+1]] + 0.2 * lp_var[var[i+2]] >= 0.0
-    # ------add the self-consistency constraints via five-point Savitzky–Golay derivative filter
-    for i in range(num_gate + 2, 2 * num_gate - 2):
-        lp_prob += (-0.2 * lp_var[var[i-2]] + (-0.1) * lp_var[var[i-1]] + 0.1 * lp_var[var[i+1]] + 0.2 * lp_var[var[i+2]]) / width >= KDP_lower_bound[i-num_gate-2]
-        lp_prob += (-0.2 * lp_var[var[i-2]] + (-0.1) * lp_var[var[i-1]] + 0.1 * lp_var[var[i+1]] + 0.2 * lp_var[var[i+2]]) / width <= KDP_higher_bound[i-num_gate-2]
+        if weights[i] != 0:
+            # ------add the fidelity constraints
+            lp_prob += weights[i] * (lp_var[var[i]] - lp_var[var[i + num_gate]]) >= -Phi_dp_array[i]
+            lp_prob += weights[i] * (lp_var[var[i]] + lp_var[var[i + num_gate]]) >= Phi_dp_array[i]
+
+    for i in range(num_gate + 2, 2*num_gate - 2):
+        w_i = weights[i - num_gate]
+        if w_i != 0:
+            # ------add the montonicity constraints via five-point Savitzky–Golay derivative filter
+            lp_prob += w_i * (-0.2*lp_var[var[i-2]] + (-0.1)*lp_var[var[i-1]] + 0.1*lp_var[var[i+1]] + 0.2*lp_var[var[i+2]]) >= 0.0
+            # ------add the self-consistency constraints via five-point Savitzky–Golay derivative filter
+            lp_prob += w_i * (-0.2*lp_var[var[i-2]] + (-0.1)*lp_var[var[i-1]] + 0.1*lp_var[var[i+1]] + 0.2*lp_var[var[i+2]]) / width >= KDP_lower_bound[i-num_gate]
+            lp_prob += w_i * (-0.2*lp_var[var[i-2]] + (-0.1)*lp_var[var[i-1]] + 0.1*lp_var[var[i+1]] + 0.2*lp_var[var[i+2]]) / width <= KDP_higher_bound[i-num_gate]
+
     # ------solve the LP problem
     # ---------use GNU Linear Programming Kit solver
     # lp_prob.solve(pl.GLPK())
@@ -668,10 +684,10 @@ def LP_solver_constraints(Phi_dp_array, width, KDP_lower_bound, KDP_higher_bound
     # ------check the status of solution
     if lp_prob.status == 1:
         phi_rec = np.array([lp_var[var[i]].varValue for i in range(num_gate, 2*num_gate)])
+        phi_rec[np.equal(phi_rec, None)] = np.nan
         # ------smoothing filter to prevent subﬁlter-length oscillations
-        Phi_dp_array[2:num_gate-2] = 0.1 * phi_rec[0:num_gate-4] + 0.25 * phi_rec[1:num_gate-3] + 0.3 * phi_rec[2:num_gate-2] + 0.25 * phi_rec[3:num_gate-1] + 0.1 * phi_rec[4:num_gate]
-        Phi_dp_array[num_gate-2] = Phi_dp_array[num_gate-3]
-        Phi_dp_array[num_gate-1] = Phi_dp_array[num_gate-3]
+        Phi_dp_array[2:-2] = 0.1*phi_rec[0:-4] + 0.25*phi_rec[1:-3] + 0.3*phi_rec[2:-2] + 0.25*phi_rec[3:-1] + 0.1*phi_rec[4:]
+        Phi_dp_array[-2:] = Phi_dp_array[-3]
     else:
         print("Linear Programming failed !!!")
 
@@ -746,9 +762,11 @@ def correct_ZPHI(ZH_array, zDr_array, Phi_dp_array, GateWidth_array, r_start, c_
 
     return ZH_array
 
-        
+
 if __name__ == "__main__":
-    nc_ds = nc.Dataset("*******dataset_path*******", "r")
+    raw_dir = "Input"
+    raw_fname = "BJXFS_20190909_180000_5_1000.nc"
+    nc_ds = nc.Dataset(os.path.join(raw_dir, raw_fname), "r")
 
     # convert mm to km
     GateWidth = np.array(nc_ds.variables["GateWidth"]) / 1000.0 / 1000.0
@@ -757,6 +775,7 @@ if __name__ == "__main__":
     rho_hv = np.array(nc_ds.variables["CrossPolCorrelation"])
     KDP = np.array(nc_ds.variables["KDP"])
     reflectivity = np.array(nc_ds.variables["Reflectivity"])
+    # reflectivity = np.where(reflectivity==0.0, -33.0, reflectivity)
 
     temperature = np.zeros_like(reflectivity)
 
@@ -773,12 +792,30 @@ if __name__ == "__main__":
     rho_hv[Phi_dp == -2.0] = -0.025
     zDr[Phi_dp == -2.0] = -0.625
 
-    Phi_dp_rec, Kdp_rec = PhaseRec_hybrid(Phi_dp, GateWidth, reflectivity, zDr, rho_hv, KDP, [7.1827e-5, 1.1339, -3.3701], d_max=0.97, rho_max=0.7, population_min=5)
- 
-    id_test = np.logical_and(Phi_dp_rec <= 0.0, Phi_dp_rec != -2.0)
-    Phi_dp_rec[id_test] = 0.0
-  
+    # Phi_dp_unfold = PhaseUnfolding(Phi_dp, rho_hv, GateWidth, max_phaseDiff=-180, dphase=360)
+    # Phi_dp_rec, Kdp_rec = PhaseRec_LP(Phi_dp, KDP, rho_hv, GateWidth)
+    # Phi_dp_rec, Kdp_rec = PhaseRec_LP_mask(Phi_dp, KDP, rho_hv, GateWidth)
+    # Phi_dp_rec, Kdp_rec = PhaseRec_DROPs(Phi_dp, GateWidth, rho_hv, KDP, d_max=0.97, rho_max=0.7, population_min=10)
+    # Phi_dp_rec, Kdp_rec = PhaseRec_hybrid(Phi_dp, GateWidth, reflectivity, zDr, rho_hv, KDP, [7.1827e-5, 1.1339, -3.3701], d_max=0.97, rho_max=0.7, population_min=5)
+    Phi_dp_rec, Kdp_rec = PhaseRec_hybrid_mask(Phi_dp, GateWidth, reflectivity, zDr, rho_hv, KDP, [7.1827e-5, 1.1339, -3.3701], d_max=0.97, rho_max=0.7, population_min=5)
+    # Phi_dp_rec, Kdp_rec = PhaseRec_fuzzy(reflectivity, zDr, Phi_dp_rec, rho_hv, Kdp_rec, temperature)
+
+    #id_test = np.logical_and(Phi_dp_rec <= 0.0, Phi_dp_rec != -2.0)
+    #Phi_dp_rec[id_test] = 0.0
+
+    #np.save("Output/Phidp_hybrid.npy", Phi_dp_rec)
+    #np.save("Output/Kdp_hybrid.npy", Kdp_rec)
+
+    '''
+    Phi_dp_rec = np.load("Output/Phidp_hybrid.npy")
+    Kdp_rec = np.load("Output/Kdp_hybrid.npy")
+
+    ZH_correct = correct_ZPHI(reflectivity, zDr, Phi_dp_rec, GateWidth, 12, c_min=0.01, c_max=0.25, b_coef=0.7339)
+    ZH_correct = np.where(ZH_correct==0.0, -33.0, ZH_correct)
+    '''
+
     num_radial, num_gate = Phi_dp.shape
     GateWidth_cum = np.full(num_gate, GateWidth[0])
     GateWidth_cum = np.cumsum(GateWidth_cum)
-    ppi_vis(Phi_dp_rec, "Phi_dp_SD+CC+Hybrid.png", "DifferentialPhase", range=GateWidth_cum, title="SD+CC+Hybrid-processed $\Phi_{dp}$ at 2019/09/09 18:00:00", colorbar_label="$\Phi_{dp}$ [Degrees]")
+    ppi_vis(Phi_dp_rec, "Output_img/Phi_dp_SD+CC_LP_2d5+hybrid.png", "DifferentialPhase", range=GateWidth_cum,
+            title="SD+CC+Hybrid-processed $\Phi_{dp}$ at 2019/09/09 18:00:00", colorbar_label="$\Phi_{dp}$ [Degrees]")
