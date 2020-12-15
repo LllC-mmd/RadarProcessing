@@ -713,31 +713,39 @@ def phase_loss(c_coef, Zh, Phi_dp, GateWidth, num_sample, b=0.7339):
     return np.mean(np.abs(Phi_dp[0] + Phi_dp_rec - Phi_dp))
 
 
-def correct_ZPHI(ZH_array, zDr_array, Phi_dp_array, GateWidth_array, r_start, c_min=0.01, c_max=0.25, b_coef=0.7339):
+def correct_ZPHI(ZH_array, zDr_array, Phi_dp_array, GateWidth_array, r_start, c_min=0.01, c_max=0.25, step=0.01, b_coef=0.7339):
     num_radial, num_gate = zDr_array.shape
 
-    step = 0.01
     c_search = np.linspace(c_min, c_max, int((c_max - c_min) / step)+1)
 
     # ------set the value of ZH in the noData region to 0 for further integral computation
     Phi_dp_noData = -2.0
+    Phi_dp_array = np.where(np.isnan(Phi_dp_array), Phi_dp_noData, Phi_dp_array)
     ZH_array = np.where(Phi_dp_array == Phi_dp_noData, 0.0, ZH_array)
 
     for r in range(0, num_radial):
         # ------determine the end point of attenuation correction
         # ---------which is the end point of the last rain cell
-        noData_loc = np.where(Phi_dp_array[r] < 0.0)[0]
-        check = noData_loc[1:] - noData_loc[:-1]
-        discontinuity_set = np.where(check > 1)[0]
-        if len(discontinuity_set) == 0:
-            if len(check) == num_gate - 1:
+        # ------------if the last point of this radial direction is in a rain cell
+        if Phi_dp_array[r, -1] > 0:
+            id_end = int(num_gate - 1)
+        # ------------or the end point of the last rain cell is not the last point
+        else:
+            noData_loc = np.where(Phi_dp_array[r] < 0.0)[0]
+            # ------------if there is no rain cell, then we go to the next radial direction directly
+            if len(noData_loc) == num_gate:
                 continue
             else:
-                id_end = noData_loc[len(check)]
-        else:
-            id_end = noData_loc[discontinuity_set[-1]+1]
-        Zh_i = np.power(10.0, ZH_array[r, r_start:id_end]/10.0)
-        Phi_dp_i = Phi_dp_array[r, r_start:id_end]
+                check = noData_loc[1:] - noData_loc[:-1]
+                discontinuity_set = np.where(check > 1)[0]
+                # ---------------if there is only one gap, i.e., two rain cells over this radial direction
+                if len(discontinuity_set) == 0:
+                    id_end = noData_loc[-1]
+                # ---------------or there are multiple rain cells
+                else:
+                    id_end = noData_loc[discontinuity_set[-1]+1]
+        Zh_i = np.power(10.0, ZH_array[r, r_start:id_end+1]/10.0)
+        Phi_dp_i = Phi_dp_array[r, r_start:id_end+1]
         num_correct = len(Zh_i)
         w_r = GateWidth_array[r]
         GateWidth_r = np.full(num_correct, w_r)
@@ -757,7 +765,7 @@ def correct_ZPHI(ZH_array, zDr_array, Phi_dp_array, GateWidth_array, r_start, c_
         ZH_integral = np.array([integrate.simps(y=np.power(Zh_i[0:i+1]/10.0, b_coef), x=GateWidth_r[0:i+1]) for i in range(0, num_correct)])
         a_coef = get_para_a(ZH_integral[-1], 0.0, PIA[-1], b=b_coef)
         Zh_i_corrected = Zh_i / np.power(1.0 - 0.46 * a_coef * b_coef * ZH_integral, 1.0/b_coef)
-        ZH_array[r, r_start:id_end] = 10.0 * np.log10(Zh_i_corrected)
+        ZH_array[r, r_start:id_end+1] = 10.0 * np.log10(Zh_i_corrected)
         print(r, c_coef)
 
     return ZH_array
